@@ -131,6 +131,17 @@ class TestFormatResult:
         assert "PROFILE_NOT_CLOSED" in text
         assert "close the loop" in text
         assert "No profiles in sketch" in text
+        assert "rolled back" not in text
+
+    def test_error_path_reports_rollback(self):
+        result = {
+            "ok": False,
+            "error_kind": "REGEN_FAILED",
+            "error_message": "Compute failed",
+            "rolled_back": True,
+        }
+        text = _format_result("extrude", result).content[0].text
+        assert "rolled back: the design is unchanged by this call" in text
 
     def test_success_path_lists_fields(self):
         result = {

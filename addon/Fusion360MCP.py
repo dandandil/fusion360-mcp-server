@@ -6,6 +6,8 @@ A TCP socket server (daemon thread) accepts JSON commands and dispatches
 them through an EventBridge.
 
 Host/port override via env vars FUSION_MCP_HOST and FUSION_MCP_PORT.
+FUSION_MCP_TRANSACTIONS=0 runs design edits outside a Fusion Command
+(no single undo step, no rollback on failure).
 Set FUSION_MCP_HOST=0.0.0.0 to expose the add-in on all interfaces
 for cross-machine setups (MCP server on a different host). Only do
 this on a trusted LAN — the socket has no authentication.
@@ -43,9 +45,10 @@ def run(context):
 
         host = os.environ.get("FUSION_MCP_HOST", "localhost")
         port = int(os.environ.get("FUSION_MCP_PORT", "9876"))
+        use_transactions = os.environ.get("FUSION_MCP_TRANSACTIONS", "1") != "0"
 
         _handler = CommandHandler()
-        _bridge = EventBridge(_app, _handler)
+        _bridge = EventBridge(_app, _handler, use_transactions=use_transactions)
         _server = Fusion360MCPServer(_bridge, host=host, port=port)
         _server.start()
 

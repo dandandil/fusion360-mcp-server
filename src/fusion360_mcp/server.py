@@ -113,6 +113,8 @@ def _format_result(
             f"**{name}** ERROR ({result.get('error_kind', 'UNKNOWN')})",
             f"  {result.get('error_message', '(no message)')}",
         ]
+        if result.get("rolled_back"):
+            lines.append("  rolled back: the design is unchanged by this call")
         hints = result.get("hints") or []
         if hints:
             lines.append("  hints:")

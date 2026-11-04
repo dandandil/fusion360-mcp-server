@@ -4,6 +4,10 @@ EventBridge — dispatches work from socket threads to Fusion's main thread.
 Uses adsk.core.CustomEvent + a thread-safe queue so all Fusion API calls
 happen on the main thread.  A 200 ms backup timer fires the custom event
 periodically in case fireCustomEvent from a daemon thread is unreliable.
+
+With transactions enabled, design-editing commands run one at a time inside
+a Fusion Command (see transaction.py): the queue pauses while one is in
+flight because the command executes after the event handler returns.
 """
 
 import queue
@@ -15,6 +19,7 @@ import adsk.core
 
 from . import get_logger
 from .hints import classify
+from .transaction import TransactionRunner, is_transactional
 
 log = get_logger("bridge")
 
@@ -58,10 +63,20 @@ class EventBridge:
     result.
     """
 
-    def __init__(self, app: adsk.core.Application, command_handler):
+    def __init__(
+        self,
+        app: adsk.core.Application,
+        command_handler,
+        use_transactions: bool = True,
+    ):
         self._app = app
         self._handler = command_handler
         self._queue: queue.Queue = queue.Queue()
+        self._tx = (
+            TransactionRunner(app.userInterface, self._execute, self._poke)
+            if use_transactions
+            else None
+        )
 
         # Register a custom event on the main thread
         self._event = app.registerCustomEvent(CUSTOM_EVENT_ID)
@@ -73,7 +88,11 @@ class EventBridge:
         self._timer_thread = threading.Thread(target=self._timer_loop, daemon=True)
         self._timer_thread.start()
 
-        log.info("EventBridge initialised (custom event: %s)", CUSTOM_EVENT_ID)
+        log.info(
+            "EventBridge initialised (custom event: %s, transactions: %s)",
+            CUSTOM_EVENT_ID,
+            use_transactions,
+        )
 
     # ------------------------------------------------------------------
     # Called from socket (daemon) threads
@@ -92,11 +111,7 @@ class EventBridge:
         item = WorkItem(command)
         self._queue.put(item)
 
-        # Poke the main thread
-        try:
-            self._app.fireCustomEvent(CUSTOM_EVENT_ID)
-        except Exception:
-            pass  # timer will pick it up
+        self._poke()
 
         if not item.done.wait(timeout=timeout):
             # The client has given up.  Cancel the item so drain_queue
@@ -130,6 +145,10 @@ class EventBridge:
     def drain_queue(self):
         """Execute every queued work item (main thread only)."""
         while True:
+            if self._tx is not None:
+                self._tx.check_stalled()
+                if self._tx.busy:
+                    break
             try:
                 item: WorkItem = self._queue.get_nowait()
             except queue.Empty:
@@ -138,6 +157,9 @@ class EventBridge:
             cmd_type = item.command.get("type", "?")
             if item.cancelled:
                 log.info("Skipping cancelled command %s", cmd_type)
+                continue
+            if self._tx is not None and is_transactional(cmd_type):
+                self._tx.start(item)
                 continue
             try:
                 if cmd_type == "reload_handler":
@@ -149,12 +171,21 @@ class EventBridge:
                         "result": {"ok": True, "reloaded": True},
                     }
                 else:
-                    item.result = self._handler.execute_command(item.command)
+                    item.result = self._execute(item.command)
             except Exception as exc:
                 item.error = f"{exc}\n{traceback.format_exc()}"
                 log.error("Main-thread exec of %s raised: %s", cmd_type, exc)
             finally:
                 item.done.set()
+
+    def _execute(self, command: dict) -> dict:
+        return self._handler.execute_command(command)
+
+    def _poke(self):
+        try:
+            self._app.fireCustomEvent(CUSTOM_EVENT_ID)
+        except Exception:
+            pass  # timer will pick it up
 
     # ------------------------------------------------------------------
     # Backup timer
@@ -164,11 +195,10 @@ class EventBridge:
         interval = TIMER_INTERVAL_MS / 1000.0
         while self._timer_running:
             time.sleep(interval)
-            if not self._queue.empty():
-                try:
-                    self._app.fireCustomEvent(CUSTOM_EVENT_ID)
-                except Exception:
-                    pass
+            # A busy transaction is polled too, so a command that never
+            # starts is released by check_stalled instead of hanging.
+            if not self._queue.empty() or (self._tx is not None and self._tx.busy):
+                self._poke()
 
     # ------------------------------------------------------------------
     # Hot reload
@@ -212,6 +242,8 @@ class EventBridge:
             item.cancelled = True
             item.error = "Add-in stopped before the command executed"
             item.done.set()
+        if self._tx is not None:
+            self._tx.stop()
         try:
             self._event.remove(self._event_handler)
         except Exception:

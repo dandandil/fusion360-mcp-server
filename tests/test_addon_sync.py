@@ -135,3 +135,36 @@ def test_tools_match_addon_dispatch():
         f"  tools without handler: {sorted(tool_names - dispatch)}\n"
         f"  handlers without tool: {sorted(dispatch - tool_names)}"
     )
+
+
+def _extract_module_frozenset(path: Path, name: str) -> set[str]:
+    """String members of a module-level ``name = frozenset({...})``."""
+    tree = ast.parse(path.read_text())
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(isinstance(t, ast.Name) and t.id == name for t in node.targets):
+            continue
+        return {
+            n.value
+            for n in ast.walk(node.value)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)
+        }
+    raise AssertionError(f"{name} not found in {path}")
+
+
+def test_non_transactional_commands_are_known():
+    """Read-only tools stay outside transactions; every entry is a real command."""
+    from fusion360_mcp.tools import _READ_ONLY
+
+    non_tx = _extract_module_frozenset(
+        REPO_ROOT / "addon" / "server" / "transaction.py",
+        "NON_TRANSACTIONAL_COMMANDS",
+    )
+    dispatch = _extract_command_dispatch_keys(
+        REPO_ROOT / "addon" / "server" / "command_handler.py"
+    )
+    missing = sorted(_READ_ONLY - non_tx)
+    assert not missing, f"read-only tools missing: {missing}"
+    unknown = sorted(non_tx - dispatch - _DISPATCH_ONLY)
+    assert not unknown, f"unknown commands: {unknown}"
