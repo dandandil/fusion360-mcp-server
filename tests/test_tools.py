@@ -103,6 +103,9 @@ def test_expected_tools_present():
         "create_component",
         "add_joint",
         "list_components",
+        "get_timeline",
+        "get_feature_info",
+        "get_dependents",
         # export
         "export_step",
         "export_f3d",

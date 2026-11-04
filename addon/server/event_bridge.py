@@ -256,9 +256,10 @@ class EventBridge:
         from . import command_handler as ch_mod
         from . import hints as hints_mod
         from . import hole_geometry as hole_mod
+        from . import model_graph as graph_mod
         from . import parameter_units as units_mod
 
-        for mod in (hints_mod, hole_mod, units_mod, ch_mod):
+        for mod in (hints_mod, hole_mod, units_mod, graph_mod, ch_mod):
             importlib.reload(mod)
         self._handler = ch_mod.CommandHandler()
         # Reset lazy dispatch table so it picks up new commands

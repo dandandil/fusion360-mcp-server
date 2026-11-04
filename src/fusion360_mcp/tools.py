@@ -621,6 +621,66 @@ TOOLS: list[dict] = [
             "properties": {},
         },
     },
+    # ── timeline & dependencies ──────────────────────────────────────
+    {
+        "name": "get_timeline",
+        "title": "Get Timeline",
+        "description": (
+            "List timeline items (features, sketches, construction geometry) "
+            "with index, type, health (healthy/warning/error/...), message, "
+            "suppressed and rolled-back flags, plus the marker position. "
+            "Paginate with start/limit; problems_only lists warnings and "
+            "errors only."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "start": {"type": "integer", "default": 0},
+                "limit": {"type": "integer", "default": 100},
+                "problems_only": {"type": "boolean", "default": False},
+            },
+        },
+    },
+    {
+        "name": "get_feature_info",
+        "title": "Get Feature Info",
+        "description": (
+            "Inputs, output bodies and parameters of one timeline item. "
+            "Inputs are grouped by API property (profile, edgeSets, "
+            "referencePlane, projected, ...): sketches and features by name, "
+            "faces/edges by body and the features that created them. "
+            "Parameters are the item's model parameters (e.g. d112) with "
+            "expressions and the parameters that depend on them."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+                "name": {"type": "string", "description": "Timeline item name"},
+            },
+        },
+    },
+    {
+        "name": "get_dependents",
+        "title": "Get Dependents",
+        "description": (
+            "Later timeline items that use the given item as an input: its "
+            "sketch, or faces/edges it created. Rebuilt from feature inputs "
+            "at the current marker, so it is an estimate of what may break "
+            "when the item changes. transitive follows the chain; "
+            "include_bodies also counts any use of a body the item outputs "
+            "(broad in single-body models)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+                "name": {"type": "string", "description": "Timeline item name"},
+                "transitive": {"type": "boolean", "default": False},
+                "include_bodies": {"type": "boolean", "default": False},
+            },
+        },
+    },
     # ── export ─────────────────────────────────────────────────────────
     {
         "name": "export_step",
@@ -2480,6 +2540,9 @@ _READ_ONLY = {
     "get_object_info",
     "get_bounding_box",
     "list_components",
+    "get_timeline",
+    "get_feature_info",
+    "get_dependents",
     "get_parameters",
     "get_physical_properties",
     "measure_distance",
@@ -2501,6 +2564,9 @@ _IDEMPOTENT = {
     "get_object_info",
     "get_bounding_box",
     "list_components",
+    "get_timeline",
+    "get_feature_info",
+    "get_dependents",
     "get_parameters",
     "get_physical_properties",
     "measure_distance",

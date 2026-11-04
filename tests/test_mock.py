@@ -977,3 +977,17 @@ class TestMockFallback:
         assert "warning" in result
         assert result["mode"] == "mock"
         assert result["params_received"] == {"x": 1}
+
+
+class TestMockTimeline:
+    def test_get_timeline(self):
+        result = mock_command("get_timeline")
+        assert result["items"][1]["type"] == "ExtrudeFeature"
+
+    def test_get_feature_info(self):
+        result = mock_command("get_feature_info", {"name": "Extrude1"})
+        assert result["inputs"]["profile"][0]["name"] == "Sketch1"
+
+    def test_get_dependents(self):
+        result = mock_command("get_dependents", {"name": "Sketch1"})
+        assert result["dependents"][0]["via"] == ["Sketch1"]

@@ -1,0 +1,359 @@
+"""
+Model graph — timeline listing and feature dependencies.
+
+The API has no dependency graph, so it is rebuilt from each timeline
+entity's inputs: features expose them as properties (profile, edgeSets,
+inputEntities, ...), sketches through their plane and projected geometry.
+Faces and edges are attributed to the feature that created their faces.
+
+Inputs are read with the timeline at its current marker, so faces and edges
+come from the current model state: the graph is an approximation, good for
+"what may break", not a proof.
+
+Pure attribute access, no ``adsk`` import, so it is testable with fakes.
+"""
+
+import logging
+
+log = logging.getLogger("fusion360mcp.graph")
+
+# Feature properties that hold inputs (from the adsk.fusion API stubs)
+FEATURE_INPUT_ATTRS = (
+    "profile",
+    "path",
+    "guideRail",
+    "axis",
+    "participantBodies",
+    "edgeSets",
+    "edges",
+    "inputEntities",
+    "inputFaces",
+    "inputCylindricalFaces",
+    "loftSections",
+    "mirrorPlane",
+    "directionEntity",
+    "directionOneEntity",
+    "directionTwoEntity",
+    "targetBody",
+    "toolBodies",
+    "splittingTool",
+    "facesToSplit",
+    "trimTool",
+    "targetFaces",
+    "stitchSurfaces",
+    "surfaces",
+    "entities",
+    "deletedFaces",
+    "boundaryCurve",
+    "plane",
+    "point",
+    "tools",
+    "sourceBody",
+)
+# Construction geometry definition properties that hold inputs
+CONSTRUCTION_INPUT_ATTRS = (
+    "planarEntity",
+    "linearEntity",
+    "planeOne",
+    "planeTwo",
+    "pathEntity",
+    "edgeOne",
+    "edgeTwo",
+    "pointOne",
+    "pointTwo",
+    "pointThree",
+    "tangentFace",
+    "pointEntity",
+    "circularFace",
+    "cylinderFace",
+)
+# Wrappers whose single property holds the actual input
+_NESTED_ATTR = {
+    "PathEntity": "entity",
+    "LoftSection": "entity",
+}
+
+HEALTH_STATES = {
+    0: "healthy",
+    1: "warning",
+    2: "error",
+    3: "suppressed",
+    4: "rolled_back",
+    5: "unknown",
+}
+
+
+def short_type(obj) -> str:
+    """'adsk::fusion::ExtrudeFeature' -> 'ExtrudeFeature'."""
+    return obj.objectType.rsplit("::", 1)[-1]
+
+
+def _has(obj, attr: str) -> bool:
+    """Whether *obj* has property *attr*, without reading it (reads may raise)."""
+    return hasattr(type(obj), attr) or attr in getattr(obj, "__dict__", {})
+
+
+def _items(obj):
+    """Elements of an API collection or list, else None."""
+    if isinstance(obj, (list, tuple)):
+        return list(obj)
+    if hasattr(obj, "count") and hasattr(obj, "item"):
+        return [obj.item(i) for i in range(obj.count)]
+    return None
+
+
+# ----------------------------------------------------------------------
+# Timeline
+# ----------------------------------------------------------------------
+
+
+def timeline_entry(tl_obj) -> dict:
+    entry = {
+        "index": tl_obj.index,
+        "name": tl_obj.name,
+        "type": "Group" if tl_obj.isGroup else _entity_type(tl_obj),
+        "suppressed": tl_obj.isSuppressed,
+        "rolled_back": tl_obj.isRolledBack,
+    }
+    # healthState raises for some object types (Autodesk forum, confirmed bug)
+    try:
+        entry["health"] = HEALTH_STATES.get(tl_obj.healthState, "unknown")
+        message = tl_obj.errorOrWarningMessage
+    except Exception as exc:
+        entry["health"] = "unknown"
+        message = f"health not readable: {exc}"
+    if message:
+        entry["message"] = message
+    group = tl_obj.parentGroup
+    if group is not None:
+        entry["group"] = group.name
+    return entry
+
+
+def _entity_type(tl_obj) -> str:
+    entity = tl_obj.entity
+    return short_type(entity) if entity is not None else "?"
+
+
+def list_timeline(timeline, start=0, limit=100, problems_only=False) -> dict:
+    entries = []
+    for i in range(timeline.count):
+        entry = timeline_entry(timeline.item(i))
+        if problems_only and entry["health"] not in ("warning", "error"):
+            continue
+        entries.append(entry)
+    return {
+        "count": timeline.count,
+        "marker_position": timeline.markerPosition,
+        "total_matching": len(entries),
+        "items": entries[start : start + limit],
+    }
+
+
+def find_timeline_object(timeline, name: str):
+    for i in range(timeline.count):
+        tl_obj = timeline.item(i)
+        if tl_obj.name == name:
+            return tl_obj
+    raise RuntimeError(f"Timeline item '{name}' not found")
+
+
+# ----------------------------------------------------------------------
+# Inputs
+# ----------------------------------------------------------------------
+
+
+def face_creators(timeline) -> dict:
+    """entityToken of each face -> name of the feature that created it."""
+    creators = {}
+    for i in range(timeline.count):
+        tl_obj = timeline.item(i)
+        if tl_obj.isGroup or tl_obj.isRolledBack or tl_obj.isSuppressed:
+            continue
+        entity = tl_obj.entity
+        if entity is None or not _has(entity, "faces"):
+            continue
+        try:
+            for face in _items(entity.faces) or []:
+                creators[face.entityToken] = tl_obj.name
+        except Exception as exc:  # broken features expose no faces
+            log.debug("faces of %s not readable: %s", tl_obj.name, exc)
+    return creators
+
+
+def describe_ref(obj, creators: dict) -> list[dict]:
+    """Reduce an input object to graph nodes."""
+    elements = _items(obj)
+    if elements is not None:
+        return [ref for e in elements for ref in describe_ref(e, creators)]
+    kind = short_type(obj)
+    if kind in _NESTED_ATTR:
+        return describe_ref(getattr(obj, _NESTED_ATTR[kind]), creators)
+    if kind.endswith("EdgeSet"):
+        return describe_ref(obj.edges, creators) if _has(obj, "edges") else []
+    if kind == "Profile":
+        return [{"kind": "sketch", "name": obj.parentSketch.name}]
+    if kind == "Sketch":
+        return [{"kind": "sketch", "name": obj.name}]
+    if _has(obj, "parentSketch"):  # sketch curves, points, texts
+        return [{"kind": "sketch", "name": obj.parentSketch.name}]
+    if kind == "BRepBody":
+        return [{"kind": "body", "name": obj.name}]
+    if kind == "BRepFace":
+        return [_topology_ref("face", obj.body.name, [obj], creators)]
+    if kind == "BRepEdge":
+        return [_topology_ref("edge", obj.body.name, _items(obj.faces), creators)]
+    if kind == "BRepVertex":
+        return [{"kind": "vertex", "body": obj.body.name}]
+    if kind.startswith("Construction"):
+        return [{"kind": "construction", "name": obj.name}]
+    if kind.endswith("Feature"):
+        return [{"kind": "feature", "name": obj.name}]
+    return [{"kind": kind}]
+
+
+def _topology_ref(kind, body_name, faces, creators) -> dict:
+    features = sorted(
+        {creators[f.entityToken] for f in faces if f.entityToken in creators}
+    )
+    return {"kind": kind, "body": body_name, "created_by": features}
+
+
+def entity_inputs(entity, creators: dict) -> tuple[dict, dict]:
+    """(inputs by property, unreadable properties with errors)."""
+    kind = short_type(entity)
+    if kind == "Sketch":
+        sources = [("referencePlane", lambda: entity.referencePlane)]
+        sources.append(("projected", lambda: _projected(entity)))
+    elif kind.startswith("Construction"):
+        try:
+            definition = entity.definition
+        except Exception as exc:
+            return {}, {"definition": f"{type(exc).__name__}: {exc}"}
+        sources = [
+            (a, lambda a=a: getattr(definition, a))
+            for a in CONSTRUCTION_INPUT_ATTRS
+            if _has(definition, a)
+        ]
+    else:
+        sources = [
+            (a, lambda a=a: getattr(entity, a))
+            for a in FEATURE_INPUT_ATTRS
+            if _has(entity, a)
+        ]
+
+    inputs, unreadable = {}, {}
+    for attr, read in sources:
+        try:
+            value = read()
+            if value is None:
+                continue
+            refs = describe_ref(value, creators)
+        except Exception as exc:
+            unreadable[attr] = f"{type(exc).__name__}: {exc}"
+            continue
+        if refs:
+            inputs[attr] = _unique(refs)
+    return inputs, unreadable
+
+
+def output_bodies(entity) -> tuple[list[str], str | None]:
+    """(names of bodies the item created or modified, read error)."""
+    if not _has(entity, "bodies"):
+        return [], None
+    try:
+        return [b.name for b in _items(entity.bodies)], None
+    except Exception as exc:
+        return [], f"{type(exc).__name__}: {exc}"
+
+
+def _projected(sketch) -> list:
+    """Model entities that projected / included sketch geometry refers to."""
+    refs = []
+    for collection in (sketch.sketchCurves, sketch.sketchPoints):
+        for item in _items(collection):
+            if item.isReference and item.referencedEntity is not None:
+                refs.append(item.referencedEntity)
+    return refs
+
+
+def _unique(refs: list[dict]) -> list[dict]:
+    seen, out = set(), []
+    for ref in refs:
+        key = repr(sorted(ref.items()))
+        if key not in seen:
+            seen.add(key)
+            out.append(ref)
+    return out
+
+
+# ----------------------------------------------------------------------
+# Dependencies
+# ----------------------------------------------------------------------
+
+
+def ref_targets(ref: dict) -> tuple[set[str], set[str]]:
+    """(timeline item names, body names) an input ref points at."""
+    if ref["kind"] in ("sketch", "construction", "feature"):
+        return {ref["name"]}, set()
+    if ref["kind"] == "body":
+        return set(), {ref["name"]}
+    if ref["kind"] in ("face", "edge"):
+        return set(ref["created_by"]), {ref["body"]}
+    return set(), set()
+
+
+def build_graph(timeline) -> dict:
+    """name -> index, referenced items, input bodies, output bodies."""
+    creators = face_creators(timeline)
+    graph = {}
+    for i in range(timeline.count):
+        tl_obj = timeline.item(i)
+        entity = None if tl_obj.isGroup else tl_obj.entity
+        if entity is None:
+            continue
+        inputs, _ = entity_inputs(entity, creators)
+        refs, bodies_in = set(), set()
+        for ref_list in inputs.values():
+            for ref in ref_list:
+                names, bodies = ref_targets(ref)
+                refs |= names
+                bodies_in |= bodies
+        refs.discard(tl_obj.name)
+        bodies_out, _ = output_bodies(entity)
+        graph[tl_obj.name] = {
+            "index": tl_obj.index,
+            "refs": refs,
+            "bodies_in": bodies_in,
+            "bodies_out": set(bodies_out),
+        }
+    return graph
+
+
+def dependents(graph, name, transitive=False, include_bodies=False) -> list[dict]:
+    """Later timeline items that use *name* as an input.
+
+    Precise links are sketches, features and the features that created
+    referenced faces/edges.  With *include_bodies*, using a body that *name*
+    outputs counts too — in a big single-body model that is nearly everything.
+    """
+    if name not in graph:
+        raise RuntimeError(f"Timeline item '{name}' not found")
+    found, frontier = {}, [name]
+    while frontier:
+        current_name = frontier.pop()
+        current = graph[current_name]
+        for other, node in graph.items():
+            if other in found or other == name or node["index"] <= current["index"]:
+                continue
+            via = sorted({current_name} & node["refs"])
+            if include_bodies:
+                via += [
+                    f"body:{b}"
+                    for b in sorted(current["bodies_out"] & node["bodies_in"])
+                ]
+            if via:
+                found[other] = {"name": other, "index": node["index"], "via": via}
+                if transitive:
+                    frontier.append(other)
+    return sorted(found.values(), key=lambda d: d["index"])

@@ -392,6 +392,60 @@ def _list_components(_p: dict) -> dict:
 # ── export tools ──────────────────────────────────────────────────────
 
 
+def _get_timeline(_p: dict) -> dict:
+    return {
+        "count": 2,
+        "marker_position": 2,
+        "total_matching": 2,
+        "items": [
+            {
+                "index": 0,
+                "name": "Sketch1",
+                "type": "Sketch",
+                "suppressed": False,
+                "rolled_back": False,
+                "health": "healthy",
+            },
+            {
+                "index": 1,
+                "name": "Extrude1",
+                "type": "ExtrudeFeature",
+                "suppressed": False,
+                "rolled_back": False,
+                "health": "healthy",
+            },
+        ],
+    }
+
+
+def _get_feature_info(p: dict) -> dict:
+    return {
+        "index": 1,
+        "name": p.get("name", "Extrude1"),
+        "type": "ExtrudeFeature",
+        "suppressed": False,
+        "rolled_back": False,
+        "health": "healthy",
+        "inputs": {"profile": [{"kind": "sketch", "name": "Sketch1"}]},
+        "bodies": ["Body1"],
+        "parameters": [
+            {
+                "name": "d1",
+                "expression": "10 mm",
+                "value": 1.0,
+                "unit": "mm",
+                "role": "AlongDistance",
+                "dependents": [],
+            }
+        ],
+    }
+
+
+def _get_dependents(p: dict) -> dict:
+    found = [{"name": "Extrude1", "index": 1, "via": [p.get("name", "Sketch1")]}]
+    return {"name": p.get("name", "Sketch1"), "dependents": found, "count": 1}
+
+
 def _export_step(p: dict) -> dict:
     name = p.get("body_name", "Body1")
     path = p.get("file_path", f"~/Desktop/{name}.step")
@@ -1055,6 +1109,9 @@ _DISPATCH: dict[str, Any] = {
     "create_component": _create_component,
     "add_joint": _add_joint,
     "list_components": _list_components,
+    "get_timeline": _get_timeline,
+    "get_feature_info": _get_feature_info,
+    "get_dependents": _get_dependents,
     "export_step": _export_step,
     "export_f3d": _export_f3d,
     "export_view_sheet": _export_view_sheet,

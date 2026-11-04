@@ -23,6 +23,7 @@ import adsk.fusion
 from . import get_logger
 from . import hints as _hints
 from . import hole_geometry as _hole_geom
+from . import model_graph as _graph
 from . import parameter_units as _param_units
 
 log = get_logger("handler")
@@ -121,6 +122,10 @@ class CommandHandler:
                 "get_object_info": self.get_object_info,
                 "get_bounding_box": self.get_bounding_box,
                 "list_components": self.list_components,
+                # timeline / dependencies
+                "get_timeline": self.get_timeline,
+                "get_feature_info": self.get_feature_info,
+                "get_dependents": self.get_dependents,
                 # sketch
                 "create_sketch": self.create_sketch,
                 "draw_rectangle": self.draw_rectangle,
@@ -532,6 +537,63 @@ class CommandHandler:
                 }
 
         return {"found": False, "name": name}
+
+    # ------------------------------------------------------------------
+    # Timeline & dependencies
+    # ------------------------------------------------------------------
+
+    def _timeline(self):
+        design = self._design()
+        if design.designType != adsk.fusion.DesignTypes.ParametricDesignType:
+            raise RuntimeError(
+                "Direct design has no timeline; switch with set_design_type"
+            )
+        return design.timeline
+
+    def get_timeline(self, start: int = 0, limit: int = 100, problems_only=False):
+        return _graph.list_timeline(self._timeline(), start, limit, problems_only)
+
+    def get_feature_info(self, name: str):
+        timeline = self._timeline()
+        tl_obj = _graph.find_timeline_object(timeline, name)
+        info = _graph.timeline_entry(tl_obj)
+        entity = None if tl_obj.isGroup else tl_obj.entity
+        if entity is None:
+            return info
+        creators = _graph.face_creators(timeline)
+        info["inputs"], unreadable = _graph.entity_inputs(entity, creators)
+        info["bodies"], bodies_error = _graph.output_bodies(entity)
+        if bodies_error:
+            unreadable["bodies"] = bodies_error
+        if unreadable:
+            info["unreadable"] = unreadable
+        info["parameters"] = self._parameters_created_by(entity)
+        return info
+
+    def get_dependents(
+        self, name: str, transitive: bool = False, include_bodies: bool = False
+    ):
+        graph = _graph.build_graph(self._timeline())
+        found = _graph.dependents(graph, name, transitive, include_bodies)
+        return {"name": name, "dependents": found, "count": len(found)}
+
+    def _parameters_created_by(self, entity):
+        params = []
+        for param in self._design().allParameters:
+            created_by = getattr(param, "createdBy", None)  # ModelParameter only
+            if created_by is None or created_by.entityToken != entity.entityToken:
+                continue
+            params.append(
+                {
+                    "name": param.name,
+                    "expression": param.expression,
+                    "value": param.value,
+                    "unit": param.unit,
+                    "role": param.role,
+                    "dependents": [d.name for d in param.dependentParameters],
+                }
+            )
+        return params
 
     def list_components(self):
         root = self._root()
