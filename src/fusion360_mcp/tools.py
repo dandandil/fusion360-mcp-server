@@ -327,6 +327,54 @@ TOOLS: list[dict] = [
             "properties": {},
         },
     },
+    # ── history ──────────────────────────────────────────────────────
+    {
+        "name": "create_checkpoint",
+        "title": "Create Checkpoint",
+        "description": (
+            "Mark the current design state under a name so a series of edits "
+            "can be undone with rollback_to_checkpoint. Reusing a name moves "
+            "the checkpoint."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+                "name": {"type": "string", "description": "Checkpoint name"},
+            },
+        },
+    },
+    {
+        "name": "list_checkpoints",
+        "title": "List Checkpoints",
+        "description": (
+            "List checkpoints with the steps made since each one. Steps are "
+            "'mcp:<tool>' for tool calls and 'foreign:<command>' for edits "
+            "made outside MCP (Fusion UI, scripts)."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "rollback_to_checkpoint",
+        "title": "Rollback to Checkpoint",
+        "description": (
+            "Undo every step made after a checkpoint, one undo per tool call. "
+            "Refuses when edits were made outside MCP since the checkpoint or "
+            "the timeline changed unexpectedly; force=true undoes anyway."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+                "name": {"type": "string", "description": "Checkpoint name"},
+                "force": {
+                    "type": "boolean",
+                    "description": "Undo even if foreign edits are in the way",
+                    "default": False,
+                },
+            },
+        },
+    },
     # ── code execution ───────────────────────────────────────────────
     {
         "name": "execute_code",
@@ -2444,8 +2492,9 @@ _READ_ONLY = {
     "cam_get_operation_info",
     "get_design_type",
     "render_view",
+    "list_checkpoints",
 }
-_DESTRUCTIVE = {"delete_all", "delete_parameter"}
+_DESTRUCTIVE = {"delete_all", "delete_parameter", "rollback_to_checkpoint"}
 _IDEMPOTENT = {
     "ping",
     "get_scene_info",
@@ -2468,6 +2517,7 @@ _IDEMPOTENT = {
     "set_design_type",
     "rename_body",
     "render_view",
+    "list_checkpoints",
 }
 
 for _t in TOOLS:

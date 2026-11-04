@@ -43,7 +43,6 @@ NON_TRANSACTIONAL_COMMANDS = frozenset(
         "cam_list_operations",
         "cam_get_operation_info",
         # drive the UI or wait on Fusion
-        "reload_handler",
         "undo",
         "set_design_type",
         "export",
@@ -100,16 +99,18 @@ class _DestroyHandler(adsk.core.CommandEventHandler):
 class TransactionRunner:
     """Runs work items one at a time, each inside its own Fusion Command.
 
-    *execute(command) -> response* does the work; *on_finished()* is called
-    on the main thread once an item is done so the caller can continue.
+    *execute(command) -> response* does the work; *on_committed(cmd_type)* is
+    called for each successful (not rolled back) item; *on_finished()* is
+    called on the main thread once an item is done so the caller can continue.
     """
 
-    def __init__(self, ui, execute, on_finished):
+    def __init__(self, ui, execute, on_committed, on_finished):
         defs = ui.commandDefinitions
         self._cmd_def = defs.itemById(COMMAND_ID) or defs.addButtonDefinition(
             COMMAND_ID, "MCP", "Fusion360MCP transaction"
         )
         self._execute = execute
+        self._on_committed = on_committed
         self._on_finished = on_finished
         self._created_handler = _CreatedHandler(self)
         self._cmd_def.commandCreated.add(self._created_handler)
@@ -179,6 +180,8 @@ class TransactionRunner:
             result = response.get("result")
             if isinstance(result, dict):
                 result["rolled_back"] = True
+        else:
+            self._on_committed(item.command.get("type", "?"))
         item.result = response
 
     def _on_destroy(self):

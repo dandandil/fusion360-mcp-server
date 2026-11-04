@@ -251,6 +251,33 @@ def _undo(_p: dict) -> dict:
     return {"undone": True, "design_type": 1}
 
 
+def _create_checkpoint(p: dict) -> dict:
+    return {
+        "checkpoint": p.get("name", "cp"),
+        "position": 0,
+        "document": "MockDesign",
+        "timeline_count": 1,
+    }
+
+
+def _list_checkpoints(_p: dict) -> dict:
+    return {
+        "checkpoints": [
+            {"name": "cp", "document": "MockDesign", "steps_since": ["mcp:extrude"]}
+        ],
+        "journal": ["mcp:extrude"],
+    }
+
+
+def _rollback_to_checkpoint(p: dict) -> dict:
+    return {
+        "checkpoint": p.get("name", "cp"),
+        "undone": ["mcp:extrude"],
+        "timeline_count": 1,
+        "timeline_matches_checkpoint": True,
+    }
+
+
 def _execute_code(p: dict) -> dict:
     return {"executed": True, "code": p.get("code", ""), "result": "None", "output": ""}
 
@@ -1014,6 +1041,9 @@ _DISPATCH: dict[str, Any] = {
     "boolean_operation": _boolean_operation,
     "delete_all": _delete_all,
     "undo": _undo,
+    "create_checkpoint": _create_checkpoint,
+    "list_checkpoints": _list_checkpoints,
+    "rollback_to_checkpoint": _rollback_to_checkpoint,
     "execute_code": _execute_code,
     "sweep": _sweep,
     "loft": _loft,

@@ -113,28 +113,7 @@ def _extract_command_dispatch_keys(path: Path) -> set[str]:
 
 # Commands the add-in dispatches that are intentionally not MCP tools.
 _DISPATCH_ONLY = {"reload_handler"}
-
-
-def test_tools_match_addon_dispatch():
-    """Every MCP tool must have an add-in handler, and vice versa.
-
-    This is the drift guard that catches "added a tool to tools.py but
-    forgot the CommandHandler entry" (and the reverse) at CI time.
-    """
-    from fusion360_mcp.tools import TOOLS
-
-    tool_names = {t["name"] for t in TOOLS}
-    dispatch = (
-        _extract_command_dispatch_keys(
-            REPO_ROOT / "addon" / "server" / "command_handler.py"
-        )
-        - _DISPATCH_ONLY
-    )
-    assert tool_names == dispatch, (
-        f"tools.py and CommandHandler._COMMANDS have drifted.\n"
-        f"  tools without handler: {sorted(tool_names - dispatch)}\n"
-        f"  handlers without tool: {sorted(dispatch - tool_names)}"
-    )
+ADDON_SERVER = REPO_ROOT / "addon" / "server"
 
 
 def _extract_module_frozenset(path: Path, name: str) -> set[str]:
@@ -153,18 +132,43 @@ def _extract_module_frozenset(path: Path, name: str) -> set[str]:
     raise AssertionError(f"{name} not found in {path}")
 
 
+def _bridge_commands() -> set[str]:
+    return _extract_module_frozenset(
+        ADDON_SERVER / "event_bridge.py", "BRIDGE_COMMANDS"
+    )
+
+
+def test_tools_match_addon_dispatch():
+    """Every MCP tool must have an add-in handler, and vice versa.
+
+    This is the drift guard that catches "added a tool to tools.py but
+    forgot the CommandHandler entry" (and the reverse) at CI time.
+    Bridge-level commands (EventBridge.BRIDGE_COMMANDS) count as handlers.
+    """
+    from fusion360_mcp.tools import TOOLS
+
+    tool_names = {t["name"] for t in TOOLS}
+    dispatch = (
+        _extract_command_dispatch_keys(ADDON_SERVER / "command_handler.py")
+        | _bridge_commands()
+    ) - _DISPATCH_ONLY
+    assert tool_names == dispatch, (
+        f"tools.py and the add-in dispatch have drifted.\n"
+        f"  tools without handler: {sorted(tool_names - dispatch)}\n"
+        f"  handlers without tool: {sorted(dispatch - tool_names)}"
+    )
+
+
 def test_non_transactional_commands_are_known():
     """Read-only tools stay outside transactions; every entry is a real command."""
     from fusion360_mcp.tools import _READ_ONLY
 
     non_tx = _extract_module_frozenset(
-        REPO_ROOT / "addon" / "server" / "transaction.py",
-        "NON_TRANSACTIONAL_COMMANDS",
+        ADDON_SERVER / "transaction.py", "NON_TRANSACTIONAL_COMMANDS"
     )
-    dispatch = _extract_command_dispatch_keys(
-        REPO_ROOT / "addon" / "server" / "command_handler.py"
-    )
-    missing = sorted(_READ_ONLY - non_tx)
+    bridge = _bridge_commands()
+    dispatch = _extract_command_dispatch_keys(ADDON_SERVER / "command_handler.py")
+    missing = sorted(_READ_ONLY - bridge - non_tx)
     assert not missing, f"read-only tools missing: {missing}"
-    unknown = sorted(non_tx - dispatch - _DISPATCH_ONLY)
+    unknown = sorted(non_tx - dispatch)
     assert not unknown, f"unknown commands: {unknown}"

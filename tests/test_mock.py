@@ -54,10 +54,13 @@ class TestMockSceneQuery:
         assert len(result["center"]) == 3
 
     def test_import_mesh(self):
-        result = mock_command("import_mesh", {
-            "file_path": "/tmp/wheel_arch.stl",
-            "units": "mm",
-        })
+        result = mock_command(
+            "import_mesh",
+            {
+                "file_path": "/tmp/wheel_arch.stl",
+                "units": "mm",
+            },
+        )
         assert result["imported"] is True
         assert result["file_path"] == "/tmp/wheel_arch.stl"
         assert result["units"] == "mm"
@@ -65,38 +68,52 @@ class TestMockSceneQuery:
         assert "bounding_box" in result
 
     def test_create_box_parametric_numeric(self):
-        result = mock_command("create_box_parametric", {
-            "length": 56, "width": 30, "height": 25,
-        })
+        result = mock_command(
+            "create_box_parametric",
+            {
+                "length": 56,
+                "width": 30,
+                "height": 25,
+            },
+        )
         assert result["created"] is True
         assert result["length"] == 56
         assert "body_name" in result
         assert "sketch_name" in result
 
     def test_create_box_parametric_expression(self):
-        result = mock_command("create_box_parametric", {
-            "length": "boxL",
-            "width": "boxW",
-            "height": "boxH - wall_t",
-            "body_name": "BoxRechts",
-        })
+        result = mock_command(
+            "create_box_parametric",
+            {
+                "length": "boxL",
+                "width": "boxW",
+                "height": "boxH - wall_t",
+                "body_name": "BoxRechts",
+            },
+        )
         assert result["body_name"] == "BoxRechts"
         assert result["height"] == "boxH - wall_t"
 
     def test_export_unified_infers_format(self):
-        result = mock_command("export", {
-            "body_name": "BoxRechts",
-            "file_path": "/tmp/BoxRechts.step",
-        })
+        result = mock_command(
+            "export",
+            {
+                "body_name": "BoxRechts",
+                "file_path": "/tmp/BoxRechts.step",
+            },
+        )
         assert result["exported"] is True
         assert result["format"] == "step"
         assert result["body"] == "BoxRechts"
 
     def test_export_unified_explicit_format(self):
-        result = mock_command("export", {
-            "format": "stl",
-            "body_name": "Part1",
-        })
+        result = mock_command(
+            "export",
+            {
+                "format": "stl",
+                "body_name": "Part1",
+            },
+        )
         assert result["format"] == "stl"
 
 
@@ -214,6 +231,21 @@ class TestMockSceneControl:
         result = mock_command("undo")
         assert result["undone"] is True
         assert "design_type" in result
+
+
+class TestMockHistory:
+    def test_create_checkpoint(self):
+        result = mock_command("create_checkpoint", {"name": "before_fillet"})
+        assert result["checkpoint"] == "before_fillet"
+
+    def test_list_checkpoints(self):
+        result = mock_command("list_checkpoints")
+        assert result["checkpoints"][0]["steps_since"] == ["mcp:extrude"]
+
+    def test_rollback_to_checkpoint(self):
+        result = mock_command("rollback_to_checkpoint", {"name": "before_fillet"})
+        assert result["undone"] == ["mcp:extrude"]
+        assert result["timeline_matches_checkpoint"] is True
 
 
 class TestMockExecuteCode:
@@ -344,17 +376,19 @@ class TestMockExport:
             assert v["path"].endswith(f"{v['view']}.png")
 
     def test_export_view_sheet_custom(self):
-        result = mock_command("export_view_sheet", {
-            "title": "Orb v0.4",
-            "views": ["iso", "front", "right"],
-            "image_size": [1920, 1080],
-            "output_dir": "/tmp/orb_views",
-        })
+        result = mock_command(
+            "export_view_sheet",
+            {
+                "title": "Orb v0.4",
+                "views": ["iso", "front", "right"],
+                "image_size": [1920, 1080],
+                "output_dir": "/tmp/orb_views",
+            },
+        )
         assert result["title"] == "Orb v0.4"
         assert result["image_size"] == [1920, 1080]
         assert result["output_dir"] == "/tmp/orb_views"
-        assert [v["view"] for v in result["views"]] == \
-            ["iso", "front", "right"]
+        assert [v["view"] for v in result["views"]] == ["iso", "front", "right"]
 
 
 class TestMockParameters:

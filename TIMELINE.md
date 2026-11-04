@@ -29,3 +29,15 @@
   3. смена `cmd_def.name` перед запуском меняет имя шага в истории undo;
   4. `execute_code` и фичи (extrude, fillet, правка эскиза) работают внутри команды; `undo` отменяет весь вызов инструмента;
   5. что происходит с активной командой пользователя в UI в момент вызова.
+
+## 2026-11-04 — Именованные точки отката через журнал undo
+
+- Инструменты `create_checkpoint`, `list_checkpoints`, `rollback_to_checkpoint` (`addon/server/history.py`). Выбран вариант «через историю undo»: шаг MCP = одна транзакция = один undo, откат = N undo.
+- Прочитать список undo через API нельзя (форум Autodesk: «transactions … are not currently supported by the API so its not possible to find out whats in the undo list»). Поэтому журнал — зеркало: шаги MCP пишет мост после успешной транзакции, остальные завершённые команды (UI, скрипты) ловим через `UserInterface.commandTerminated` (документирован, `CompletedTerminationReason`) и пишем как foreign. Undo (`UndoCommand`) снимает последнюю запись; redo пишется как foreign.
+- Откат отказывает (`HISTORY_CONFLICT`), если после точки есть foreign-записи или число элементов таймлайна не совпадает с записанным после последнего шага (вторая проверка ловит то, что журнал не увидел). `force=true` откатывает всё равно.
+- Журнал и команды живут в мосте (`BRIDGE_COMMANDS`), а не в `CommandHandler`, чтобы переживать `reload_handler`. Без транзакций команды отвечают ошибкой.
+- Документ отождествляется по имени — грубо, проверить на живом Fusion.
+- Проверено на поддельном `adsk` (tests/test_bridge.py). Не проверено на живом Fusion:
+  1. приходит ли `commandTerminated` для `UndoCommand` (и Ctrl+Z), и с каким id;
+  2. какие завершённые команды не создают шаг undo (выбор, камера, измерения) — их добавить в `IGNORED_COMMAND_IDS`; все foreign id пишутся в лог;
+  3. выполняется ли `UndoCommand.execute()` + `doEvents()` синхронно внутри обработчика (смотреть `timeline_matches_checkpoint`).

@@ -19,12 +19,23 @@ import adsk.core
 
 from . import get_logger
 from .hints import classify
-from .transaction import TransactionRunner, is_transactional
+from .history import History, HistoryError
+from .transaction import COMMAND_ID, TransactionRunner, is_transactional
 
 log = get_logger("bridge")
 
 CUSTOM_EVENT_ID = "Fusion360MCP_BridgeEvent"
 TIMER_INTERVAL_MS = 200  # backup polling interval
+
+# Commands the bridge runs itself: their state must survive reload_handler
+BRIDGE_COMMANDS = frozenset(
+    {
+        "reload_handler",
+        "create_checkpoint",
+        "list_checkpoints",
+        "rollback_to_checkpoint",
+    }
+)
 
 
 class WorkItem:
@@ -72,11 +83,16 @@ class EventBridge:
         self._app = app
         self._handler = command_handler
         self._queue: queue.Queue = queue.Queue()
-        self._tx = (
-            TransactionRunner(app.userInterface, self._execute, self._poke)
-            if use_transactions
-            else None
-        )
+        self._tx = None
+        self._history = None
+        if use_transactions:
+            self._history = History(app, COMMAND_ID)
+            self._tx = TransactionRunner(
+                app.userInterface,
+                self._execute,
+                self._history.record_step,
+                self._poke,
+            )
 
         # Register a custom event on the main thread
         self._event = app.registerCustomEvent(CUSTOM_EVENT_ID)
@@ -158,18 +174,18 @@ class EventBridge:
             if item.cancelled:
                 log.info("Skipping cancelled command %s", cmd_type)
                 continue
-            if self._tx is not None and is_transactional(cmd_type):
+            if (
+                self._tx is not None
+                and cmd_type not in BRIDGE_COMMANDS
+                and is_transactional(cmd_type)
+            ):
                 self._tx.start(item)
                 continue
             try:
-                if cmd_type == "reload_handler":
-                    # Must run on the main thread — CommandHandler's
-                    # constructor touches the Fusion API.
-                    self.reload_handler()
-                    item.result = {
-                        "status": "success",
-                        "result": {"ok": True, "reloaded": True},
-                    }
+                if cmd_type in BRIDGE_COMMANDS:
+                    item.result = self._run_bridge_command(
+                        cmd_type, item.command.get("params", {})
+                    )
                 else:
                     item.result = self._execute(item.command)
             except Exception as exc:
@@ -180,6 +196,30 @@ class EventBridge:
 
     def _execute(self, command: dict) -> dict:
         return self._handler.execute_command(command)
+
+    def _run_bridge_command(self, cmd_type: str, params: dict) -> dict:
+        if cmd_type == "reload_handler":
+            # Main thread only: CommandHandler's constructor touches the API
+            self.reload_handler()
+            result = {"reloaded": True}
+        else:
+            try:
+                if self._history is None:
+                    raise HistoryError(
+                        "Checkpoints need transactions",
+                        "INVALID_INPUT",
+                        ["unset FUSION_MCP_TRANSACTIONS=0 and restart the add-in"],
+                    )
+                result = getattr(self._history, cmd_type)(**params)
+            except HistoryError as exc:
+                result = {
+                    "ok": False,
+                    "error_kind": exc.error_kind,
+                    "error_message": str(exc),
+                    "hints": exc.hints,
+                }
+        result.setdefault("ok", True)
+        return {"status": "success", "result": result}
 
     def _poke(self):
         try:
@@ -244,6 +284,7 @@ class EventBridge:
             item.done.set()
         if self._tx is not None:
             self._tx.stop()
+            self._history.stop()
         try:
             self._event.remove(self._event_handler)
         except Exception:

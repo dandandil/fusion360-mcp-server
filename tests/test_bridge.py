@@ -1,9 +1,11 @@
-"""EventBridge + TransactionRunner against a fake ``adsk`` runtime.
+"""EventBridge, TransactionRunner and History against a fake ``adsk`` runtime.
 
 The fake reproduces the behaviour the add-in relies on:
 ``CommandDefinition.execute()`` only schedules the command, which runs
-(created → execute → destroy) after the current event handler returns.
-Whether Fusion really rolls back on ``executeFailed`` is checked live.
+(created → execute → destroy) after the current event handler returns;
+``executeFailed`` rolls the command's edits back; every completed command
+fires ``commandTerminated``.  Whether Fusion really behaves like this is
+checked live (see TIMELINE.md).
 """
 
 from __future__ import annotations
@@ -18,6 +20,9 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ADDON_SERVER = REPO_ROOT / "addon" / "server"
+COMPLETED = 1
+PARAMETRIC = 1
+UNDO = "UndoCommand"
 
 
 class _Event:
@@ -30,11 +35,17 @@ class _Event:
     def remove(self, handler):
         self.handlers.remove(handler)
 
+    def fire(self, args):
+        for h in list(self.handlers):
+            h.notify(args)
+
 
 class _Args:
-    def __init__(self, command=None):
+    def __init__(self, command=None, command_id=None, reason=COMPLETED):
         self.command = command
         self.executeFailed = False
+        self.commandId = command_id
+        self.terminationReason = reason
 
 
 class _Command:
@@ -44,8 +55,8 @@ class _Command:
 
 
 class _CommandDefinition:
-    def __init__(self, ui, cmd_id):
-        self._ui = ui
+    def __init__(self, app, cmd_id):
+        self._app = app
         self.id = cmd_id
         self.name = ""
         self.commandCreated = _Event()
@@ -65,41 +76,74 @@ class _CommandDefinition:
             if not self.start_command:
                 continue
             command = _Command()
-            for h in list(self.commandCreated.handlers):
-                h.notify(_Args(command))
+            timeline_before = self._app.timeline.count
+            self.commandCreated.fire(_Args(command))
             args = _Args(command)
-            for h in list(command.execute.handlers):
-                h.notify(args)
-            self.undo_names.append(self.name)
+            command.execute.fire(args)
+            if args.executeFailed:
+                self._app.timeline.count = timeline_before
+            else:
+                self.undo_names.append(self.name)
             self.failed.append(args.executeFailed)
-            for h in list(command.destroy.handlers):
-                h.notify(_Args(command))
+            command.destroy.fire(_Args(command))
+            self._app.terminate(self.id)
 
     def deleteMe(self):
-        self._ui.commandDefinitions.defs.pop(self.id, None)
+        self._app.userInterface.commandDefinitions.defs.pop(self.id, None)
+
+
+class _UndoDefinition:
+    """Undo runs synchronously here; each step removed one timeline item."""
+
+    def __init__(self, app):
+        self._app = app
+
+    def execute(self):
+        self._app.timeline.count -= 1
+        self._app.terminate(UNDO)
+        return True
 
 
 class _CommandDefinitions:
-    def __init__(self, ui):
-        self._ui = ui
-        self.defs = {}
+    def __init__(self, app):
+        self._app = app
+        self.defs = {UNDO: _UndoDefinition(app)}
 
     def itemById(self, cmd_id):
         return self.defs.get(cmd_id)
 
     def addButtonDefinition(self, cmd_id, name, tooltip):
-        self.defs[cmd_id] = _CommandDefinition(self._ui, cmd_id)
+        self.defs[cmd_id] = _CommandDefinition(self._app, cmd_id)
         return self.defs[cmd_id]
 
 
 class _UI:
-    def __init__(self):
-        self.commandDefinitions = _CommandDefinitions(self)
+    def __init__(self, app):
+        self.commandDefinitions = _CommandDefinitions(app)
+        self.commandTerminated = _Event()
+
+
+class _Design:
+    def __init__(self, timeline):
+        self.designType = PARAMETRIC
+        self.timeline = timeline
+
+
+class _Products:
+    def __init__(self, design):
+        self._design = design
+
+    def itemByProductType(self, product_type):
+        return self._design
 
 
 class _App:
     def __init__(self):
-        self.userInterface = _UI()
+        self.userInterface = _UI(self)
+        self.timeline = types.SimpleNamespace(count=0)
+        self.activeDocument = types.SimpleNamespace(
+            name="Doc1", products=_Products(_Design(self.timeline))
+        )
 
     def registerCustomEvent(self, event_id):
         return _Event()
@@ -110,17 +154,29 @@ class _App:
     def fireCustomEvent(self, event_id):
         pass
 
+    def terminate(self, command_id, reason=COMPLETED):
+        self.userInterface.commandTerminated.fire(_Args(None, command_id, reason))
+
+    def ui_edit(self, command_id="ExtrudeCommand"):
+        """The user edits the design in Fusion's UI."""
+        self.timeline.count += 1
+        self.terminate(command_id)
+
 
 class _Handler:
-    """Stand-in for CommandHandler: records calls, fails on request."""
+    """Stand-in for CommandHandler: records calls, edits, fails on request."""
 
-    def __init__(self):
+    def __init__(self, app):
+        self._app = app
         self.calls = []
 
     def execute_command(self, command):
         self.calls.append(command["type"])
         if command.get("params", {}).get("fail"):
+            self._app.timeline.count += 1  # partial edit before the failure
             return {"status": "success", "result": {"ok": False, "error_kind": "X"}}
+        if command["type"] not in ("get_scene_info",):
+            self._app.timeline.count += 1
         return {"status": "success", "result": {"ok": True}}
 
 
@@ -130,20 +186,29 @@ def _fake_adsk():
         "CustomEventHandler",
         "CommandCreatedEventHandler",
         "CommandEventHandler",
+        "ApplicationCommandEventHandler",
     ):
         setattr(core, name, type(name, (), {"__init__": lambda self: None}))
     core.Application = _App
+    core.CommandTerminationReason = types.SimpleNamespace(
+        CompletedTerminationReason=COMPLETED
+    )
+    fusion = types.ModuleType("adsk.fusion")
+    fusion.DesignTypes = types.SimpleNamespace(ParametricDesignType=PARAMETRIC)
     adsk = types.ModuleType("adsk")
     adsk.core = core
-    return adsk, core
+    adsk.fusion = fusion
+    adsk.doEvents = lambda: None
+    return adsk, core, fusion
 
 
 @pytest.fixture(scope="module")
 def addon(tmp_path_factory):
-    adsk, core = _fake_adsk()
+    adsk, core, fusion = _fake_adsk()
     with pytest.MonkeyPatch.context() as mp:
         mp.setitem(sys.modules, "adsk", adsk)
         mp.setitem(sys.modules, "adsk.core", core)
+        mp.setitem(sys.modules, "adsk.fusion", fusion)
         mp.setenv("HOME", str(tmp_path_factory.mktemp("home")))  # add-in log file
         spec = importlib.util.spec_from_file_location(
             "_addon_server",
@@ -163,10 +228,12 @@ def addon(tmp_path_factory):
 @pytest.fixture
 def setup(addon):
     app = _App()
-    handler = _Handler()
+    handler = _Handler(app)
     bridge = addon.bridge.EventBridge(app, handler)
     cmd_def = app.userInterface.commandDefinitions.itemById(addon.tx.COMMAND_ID)
-    yield types.SimpleNamespace(bridge=bridge, handler=handler, cmd_def=cmd_def)
+    yield types.SimpleNamespace(
+        app=app, bridge=bridge, handler=handler, cmd_def=cmd_def
+    )
     bridge.stop()
 
 
@@ -229,6 +296,7 @@ def test_failure_aborts_command_and_reports_rollback(setup):
     t.join(2)
     assert setup.cmd_def.failed == [True]
     assert box["r"]["result"]["rolled_back"] is True
+    assert setup.app.timeline.count == 0
 
 
 def test_mutations_run_one_at_a_time(setup):
@@ -281,7 +349,7 @@ def test_stop_releases_in_flight_item(setup):
 
 def test_transactions_can_be_disabled(addon):
     app = _App()
-    handler = _Handler()
+    handler = _Handler(app)
     bridge = addon.bridge.EventBridge(app, handler, use_transactions=False)
     t, box = _submit(bridge, "extrude")
     _wait_queued(bridge, 1)
@@ -289,4 +357,80 @@ def test_transactions_can_be_disabled(addon):
     t.join(2)
     bridge.stop()
     assert box["r"]["result"]["ok"] is True
-    assert app.userInterface.commandDefinitions.defs == {}
+    assert addon.tx.COMMAND_ID not in app.userInterface.commandDefinitions.defs
+
+
+# ── history ──────────────────────────────────────────────────────────
+
+
+def _call(setup, cmd_type, **params):
+    """Run one command end to end, as Fusion would; return its result."""
+    t, box = _submit(setup.bridge, cmd_type, **params)
+    _wait_queued(setup.bridge, 1)
+    setup.bridge.drain_queue()
+    setup.cmd_def.run_scheduled()
+    t.join(2)
+    return box["r"]["result"]
+
+
+def test_rollback_undoes_mcp_steps_after_checkpoint(setup):
+    _call(setup, "extrude")
+    _call(setup, "create_checkpoint", name="cp")
+    _call(setup, "fillet")
+    _call(setup, "chamfer", fail=True)  # rolled back: not a step
+    _call(setup, "shell")
+    steps = _call(setup, "list_checkpoints")["checkpoints"][0]["steps_since"]
+    assert steps == ["mcp:fillet", "mcp:shell"]
+
+    result = _call(setup, "rollback_to_checkpoint", name="cp")
+    assert result["ok"] is True
+    assert result["undone"] == ["mcp:fillet", "mcp:shell"]
+    assert result["timeline_matches_checkpoint"] is True
+    assert setup.app.timeline.count == 1
+    assert _call(setup, "list_checkpoints")["journal"] == ["mcp:extrude"]
+
+
+def test_rollback_refuses_after_foreign_edit(setup):
+    _call(setup, "create_checkpoint", name="cp")
+    _call(setup, "extrude")
+    setup.app.ui_edit("FilletCommand")
+    result = _call(setup, "rollback_to_checkpoint", name="cp")
+    assert result["ok"] is False
+    assert result["error_kind"] == "HISTORY_CONFLICT"
+    assert "FilletCommand" in result["error_message"]
+    assert setup.app.timeline.count == 2
+
+    forced = _call(setup, "rollback_to_checkpoint", name="cp", force=True)
+    assert forced["undone"] == ["mcp:extrude", "foreign:FilletCommand"]
+    assert setup.app.timeline.count == 0
+
+
+def test_user_undo_pops_journal(setup):
+    _call(setup, "create_checkpoint", name="cp")
+    _call(setup, "extrude")
+    _call(setup, "fillet")
+    setup.app.userInterface.commandDefinitions.itemById(UNDO).execute()  # Ctrl+Z
+    result = _call(setup, "rollback_to_checkpoint", name="cp")
+    assert result["undone"] == ["mcp:extrude"]
+    assert setup.app.timeline.count == 0
+
+
+def test_rollback_refuses_on_unseen_timeline_change(setup):
+    _call(setup, "create_checkpoint", name="cp")
+    _call(setup, "extrude")
+    setup.app.timeline.count += 1  # an edit that fired no commandTerminated
+    result = _call(setup, "rollback_to_checkpoint", name="cp")
+    assert result["error_kind"] == "HISTORY_CONFLICT"
+    assert "journal expects 1" in result["error_message"]
+
+
+def test_rollback_to_unknown_checkpoint(setup):
+    result = _call(setup, "rollback_to_checkpoint", name="nope")
+    assert result["error_kind"] == "INVALID_INPUT"
+
+
+def test_undo_past_checkpoint_drops_it(setup):
+    _call(setup, "extrude")
+    _call(setup, "create_checkpoint", name="cp")
+    setup.app.userInterface.commandDefinitions.itemById(UNDO).execute()
+    assert _call(setup, "list_checkpoints")["checkpoints"] == []

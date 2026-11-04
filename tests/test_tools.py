@@ -83,6 +83,10 @@ def test_expected_tools_present():
         # scene control
         "delete_all",
         "undo",
+        # history
+        "create_checkpoint",
+        "list_checkpoints",
+        "rollback_to_checkpoint",
         # code execution
         "execute_code",
         # health
