@@ -12,10 +12,16 @@ TOOLS: list[dict] = [
     {
         "name": "get_scene_info",
         "title": "Get Scene Info",
-        "description": "Get design name, bodies, sketches, features, camera info",
+        "description": (
+            "Get design name, bodies, sketches, features, camera info. Body "
+            "and sketch lists are capped at limit (counts stay exact); on big "
+            "models use get_timeline filters or features_near instead."
+        ),
         "inputSchema": {
             "type": "object",
-            "properties": {},
+            "properties": {
+                "limit": {"type": "integer", "default": 50},
+            },
         },
     },
     {
@@ -803,6 +809,15 @@ TOOLS: list[dict] = [
                 "start": {"type": "integer", "default": 0},
                 "limit": {"type": "integer", "default": 100},
                 "problems_only": {"type": "boolean", "default": False},
+                "name_contains": {
+                    "type": "string",
+                    "description": "Case-insensitive name filter",
+                },
+                "types": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Item types, e.g. ['Sketch', 'FilletFeature']",
+                },
             },
         },
     },
@@ -822,6 +837,23 @@ TOOLS: list[dict] = [
             "required": ["name"],
             "properties": {
                 "name": {"type": "string", "description": "Timeline item name"},
+            },
+        },
+    },
+    {
+        "name": "features_near",
+        "title": "Features Near",
+        "description": (
+            "Timeline items (features by the faces they created, sketches by "
+            "their box) within radius cm of a point, nearest first. Use it to "
+            "find what makes up one area of a big model without listing it all."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["point", "radius"],
+            "properties": {
+                "point": {"type": "array", "items": {"type": "number"}},
+                "radius": {"type": "number"},
             },
         },
     },
@@ -2652,7 +2684,11 @@ TOOLS: list[dict] = [
             "the model. Pass a canonical view (iso/front/top/etc.) to "
             "reposition the camera first, or 'current' to keep it as is. "
             "Returns base64-encoded image bytes alongside metadata; the MCP "
-            "server delivers it as an image content block."
+            "server delivers it as an image content block. To look at one "
+            "area instead of the whole model, pass focus (a body, sketch or "
+            "timeline item; a sketch is shown along its normal with its "
+            "dimensions) or center + radius in cm. The camera actually "
+            "applied is returned."
         ),
         "inputSchema": {
             "type": "object",
@@ -2691,6 +2727,19 @@ TOOLS: list[dict] = [
                     "default": True,
                     "description": "Call Viewport.fit() before capture",
                 },
+                "focus": {
+                    "type": "string",
+                    "description": "Body, sketch or timeline item to frame",
+                },
+                "center": {
+                    "type": "array",
+                    "items": {"type": "number"},
+                    "description": "Point to frame [x, y, z] in cm",
+                },
+                "radius": {
+                    "type": "number",
+                    "description": "Radius around the center to show, cm",
+                },
             },
         },
     },
@@ -2708,6 +2757,7 @@ _READ_ONLY = {
     "get_timeline",
     "get_feature_info",
     "get_dependents",
+    "features_near",
     "get_parameters",
     "get_physical_properties",
     "measure_distance",
@@ -2742,6 +2792,7 @@ _IDEMPOTENT = {
     "get_timeline",
     "get_feature_info",
     "get_dependents",
+    "features_near",
     "get_parameters",
     "get_physical_properties",
     "measure_distance",

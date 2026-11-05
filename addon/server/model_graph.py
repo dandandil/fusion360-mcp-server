@@ -135,11 +135,22 @@ def _entity_type(tl_obj) -> str:
     return short_type(entity) if entity is not None else "?"
 
 
-def list_timeline(timeline, start=0, limit=100, problems_only=False) -> dict:
+def list_timeline(
+    timeline,
+    start=0,
+    limit=100,
+    problems_only=False,
+    name_contains=None,
+    types=None,
+) -> dict:
     entries = []
     for i in range(timeline.count):
         entry = timeline_entry(timeline.item(i))
         if problems_only and entry["health"] not in ("warning", "error"):
+            continue
+        if name_contains and name_contains.lower() not in entry["name"].lower():
+            continue
+        if types and entry["type"] not in types:
             continue
         entries.append(entry)
     return {
@@ -156,6 +167,52 @@ def find_timeline_object(timeline, name: str):
         if tl_obj.name == name:
             return tl_obj
     raise RuntimeError(f"Timeline item '{name}' not found")
+
+
+def features_near(timeline, point, radius: float) -> list[dict]:
+    """Timeline items with geometry within *radius* (cm) of *point*.
+
+    Distance is to the bounding boxes of the faces an item created (sketches:
+    the sketch box), so a large face close to the point counts as near.
+    """
+    found = []
+    for i in range(timeline.count):
+        tl_obj = timeline.item(i)
+        if tl_obj.isGroup or tl_obj.isRolledBack or tl_obj.isSuppressed:
+            continue
+        entity = tl_obj.entity
+        if entity is None:
+            continue
+        try:
+            if short_type(entity) == "Sketch":
+                boxes = [entity.boundingBox]
+            elif _has(entity, "faces"):
+                boxes = [f.boundingBox for f in _items(entity.faces)]
+            else:
+                continue
+        except Exception as exc:
+            log.debug("geometry of %s not readable: %s", tl_obj.name, exc)
+            continue
+        distances = [_box_distance(box, point) for box in boxes]
+        near = [d for d in distances if d <= radius]
+        if near:
+            found.append(
+                {
+                    "name": tl_obj.name,
+                    "index": tl_obj.index,
+                    "type": short_type(entity),
+                    "distance": round(min(near), 4),
+                    "faces_near": len(near),
+                }
+            )
+    return sorted(found, key=lambda f: (f["distance"], f["index"]))
+
+
+def _box_distance(box, point) -> float:
+    lo = (box.minPoint.x, box.minPoint.y, box.minPoint.z)
+    hi = (box.maxPoint.x, box.maxPoint.y, box.maxPoint.z)
+    gaps = [max(lo[i] - point[i], 0.0, point[i] - hi[i]) for i in range(3)]
+    return sum(g * g for g in gaps) ** 0.5
 
 
 # ----------------------------------------------------------------------

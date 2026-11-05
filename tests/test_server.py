@@ -99,6 +99,7 @@ class TestToolAnnotations:
             "get_timeline",
             "get_feature_info",
             "get_dependents",
+            "features_near",
             "get_parameters",
             "get_physical_properties",
             "measure_distance",

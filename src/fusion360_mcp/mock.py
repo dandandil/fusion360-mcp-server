@@ -448,6 +448,24 @@ def _get_dependents(p: dict) -> dict:
     return {"name": p.get("name", "Sketch1"), "dependents": found, "count": 1}
 
 
+def _features_near(p: dict) -> dict:
+    items = [
+        {
+            "name": "Extrude1",
+            "index": 1,
+            "type": "ExtrudeFeature",
+            "distance": 0.0,
+            "faces_near": 2,
+        }
+    ]
+    return {
+        "point": p.get("point"),
+        "radius": p.get("radius"),
+        "items": items,
+        "count": 1,
+    }
+
+
 def _start_job(p: dict) -> dict:
     return {"job_id": "mock0001", "tool": p.get("tool", "?")}
 
@@ -1203,6 +1221,7 @@ _DISPATCH: dict[str, Any] = {
     "get_timeline": _get_timeline,
     "get_feature_info": _get_feature_info,
     "get_dependents": _get_dependents,
+    "features_near": _features_near,
     "start_job": _start_job,
     "get_job": _get_job,
     "dry_run": _dry_run,

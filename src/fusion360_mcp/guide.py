@@ -11,8 +11,10 @@ undo step; a failed call is rolled back (rolled_back: true).
 
 Editing an existing model:
 1. Read before proposing: get_design_notes, get_timeline (problems_only), \
-get_feature_info for the features of the area, get_dependents for what you \
-plan to change.
+features_near to find what makes up the area, get_feature_info for those \
+features, get_dependents for what you plan to change. Look at the area with \
+render_view focus (a sketch shows its dimensions); avoid dumping the whole \
+model.
 2. Ask the user what the model does not say: assembly order, printing or \
 manufacturing limits, fasteners, which outer surfaces may change. Store the \
 answers with set_design_note.
@@ -32,6 +34,8 @@ EDIT_MODEL_STEPS = (
     "get_timeline",
     "get_feature_info",
     "get_dependents",
+    "features_near",
+    "render_view",
     "set_design_note",
     "set_timeline_marker",
     "create_checkpoint",

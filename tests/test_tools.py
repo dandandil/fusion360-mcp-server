@@ -118,6 +118,7 @@ def test_expected_tools_present():
         "get_timeline",
         "get_feature_info",
         "get_dependents",
+        "features_near",
         # export
         "export_step",
         "export_f3d",

@@ -129,6 +129,7 @@ class CommandHandler:
                 "get_timeline": self.get_timeline,
                 "get_feature_info": self.get_feature_info,
                 "get_dependents": self.get_dependents,
+                "features_near": self.features_near,
                 "set_timeline_marker": self.set_timeline_marker,
                 "compute_all": self.compute_all,
                 "recreate_feature": self.recreate_feature,
@@ -470,12 +471,14 @@ class CommandHandler:
     # Scene / Query
     # ------------------------------------------------------------------
 
-    def get_scene_info(self):
+    def get_scene_info(self, limit: int = 50):
+        """Scene summary; body and sketch lists are capped at *limit* so a
+        large model does not flood the context (counts stay exact)."""
         design = self._design()
         root = self._root()
 
         bodies = []
-        for i in range(root.bRepBodies.count):
+        for i in range(min(root.bRepBodies.count, limit)):
             b = root.bRepBodies.item(i)
             bodies.append(
                 {
@@ -488,7 +491,7 @@ class CommandHandler:
             )
 
         sketches = []
-        for i in range(root.sketches.count):
+        for i in range(min(root.sketches.count, limit)):
             s = root.sketches.item(i)
             sketches.append(
                 {
@@ -510,6 +513,7 @@ class CommandHandler:
                 design.timeline.count if hasattr(design, "timeline") else 0
             ),
             "camera": self._camera_info(),
+            "truncated": root.bRepBodies.count > limit or root.sketches.count > limit,
         }
 
     def get_object_info(self, name: str):
@@ -560,8 +564,21 @@ class CommandHandler:
             )
         return design.timeline
 
-    def get_timeline(self, start: int = 0, limit: int = 100, problems_only=False):
-        return _graph.list_timeline(self._timeline(), start, limit, problems_only)
+    def get_timeline(
+        self,
+        start: int = 0,
+        limit: int = 100,
+        problems_only: bool = False,
+        name_contains: str = None,
+        types: list = None,
+    ):
+        return _graph.list_timeline(
+            self._timeline(), start, limit, problems_only, name_contains, types
+        )
+
+    def features_near(self, point: list, radius: float):
+        found = _graph.features_near(self._timeline(), point, radius)
+        return {"point": point, "radius": radius, "items": found, "count": len(found)}
 
     def get_feature_info(self, name: str):
         timeline = self._timeline()
@@ -3971,6 +3988,9 @@ class CommandHandler:
         width: int = 1024,
         height: int = 768,
         fit: bool = True,
+        focus: str = None,
+        center: list = None,
+        radius: float = None,
     ):
         """Save the active viewport to a PNG and return base64-encoded bytes.
 
@@ -3978,10 +3998,15 @@ class CommandHandler:
           ``_VIEW_DIRS`` keys (iso, front, top, ...) to reposition first.
         * ``width``/``height`` — pixel dimensions.
         * ``fit`` — call viewport.fit() before capture so the model frames.
+        * ``focus`` — frame a body, sketch or timeline item instead of the
+          whole model; a sketch is viewed along its normal with its
+          dimensions shown.  ``center``/``radius`` (cm) frame a region.
 
-        If ``view != "current"``, the camera is restored to its prior state
-        before returning so the user's view isn't disturbed.
+        If the camera is moved, it is restored to its prior state before
+        returning so the user's view isn't disturbed.
         """
+        if focus is not None or center is not None:
+            return self._render_framed(view, width, height, focus, center, radius)
         viewport = self.app.activeViewport
         if viewport is None:
             raise RuntimeError("No active viewport")
@@ -4051,6 +4076,117 @@ class CommandHandler:
             "image_base64": base64.b64encode(data).decode("ascii"),
             "bytes": len(data),
         }
+
+    def _render_framed(self, view, width, height, focus, center, radius):
+        """render_view framed on one item or region (see render_view)."""
+        viewport = self.app.activeViewport
+        if viewport is None:
+            raise RuntimeError("No active viewport")
+        sketch = None
+        if focus is not None:
+            sketch = self._sketch_or_none(focus)
+            box = sketch.boundingBox if sketch is not None else self._focus_box(focus)
+            lo = (box.minPoint.x, box.minPoint.y, box.minPoint.z)
+            hi = (box.maxPoint.x, box.maxPoint.y, box.maxPoint.z)
+            center = center or [(a + b) / 2 for a, b in zip(lo, hi)]
+            radius = radius or max(math.dist(lo, hi) / 2, 0.1)
+        elif radius is None:
+            raise RuntimeError("Pass radius (cm) together with center")
+
+        if sketch is not None and view == "current":
+            normal = sketch.xDirection.crossProduct(sketch.yDirection)
+            eye_dir = (normal.x, normal.y, normal.z)
+            up = sketch.yDirection
+            up_vec = (up.x, up.y, up.z)
+        else:
+            eye_dir, up_vec = self._VIEW_DIRS.get(view, self._VIEW_DIRS["iso"])
+
+        saved_camera = viewport.camera
+        saved_sketch = sketch and (sketch.isVisible, sketch.areDimensionsShown)
+        try:
+            if sketch is not None:
+                sketch.isVisible = True
+                sketch.areDimensionsShown = True
+            camera = self._frame_camera(viewport, center, radius, eye_dir, up_vec)
+            data = self._capture(viewport, width, height)
+        finally:
+            if sketch is not None:
+                sketch.isVisible, sketch.areDimensionsShown = saved_sketch
+            viewport.camera = saved_camera
+            viewport.refresh()
+
+        return {
+            "view": view,
+            "focus": focus,
+            "camera": camera,
+            "width": width,
+            "height": height,
+            "image_format": "png",
+            "image_base64": base64.b64encode(data).decode("ascii"),
+            "bytes": len(data),
+        }
+
+    def _focus_box(self, name: str):
+        """Bounding box of a body, or of the faces a timeline item created."""
+        body = self._body_or_none(name)
+        if body is not None:
+            return body.boundingBox
+        entity = _graph.find_timeline_object(self._timeline(), name).entity
+        faces = getattr(entity, "faces", None)
+        if faces is None or faces.count == 0:
+            raise RuntimeError(f"'{name}' has no geometry to frame")
+        box = faces.item(0).boundingBox.copy()
+        for i in range(1, faces.count):
+            box.combine(faces.item(i).boundingBox)
+        return box
+
+    def _sketch_or_none(self, name: str):
+        try:
+            return self._sketch_by_name(name)
+        except RuntimeError:
+            return None
+
+    @staticmethod
+    def _frame_camera(viewport, center, radius, eye_dir, up_vec) -> dict:
+        """Orthographic camera on *center*; extents set last.
+
+        Setting viewExtents can move the eye (API docs), so it goes after
+        eye/target/up, and the camera actually applied is read back.
+        """
+        length = math.sqrt(sum(c * c for c in eye_dir)) or 1.0
+        distance = radius * 4
+        eye = [center[i] + eye_dir[i] / length * distance for i in range(3)]
+        cam = viewport.camera
+        cam.isSmoothTransition = False
+        cam.isFitView = False
+        cam.cameraType = adsk.core.CameraTypes.OrthographicCameraType
+        cam.eye = adsk.core.Point3D.create(*eye)
+        cam.target = adsk.core.Point3D.create(*center)
+        cam.upVector = adsk.core.Vector3D.create(*up_vec)
+        cam.viewExtents = radius * 1.1
+        viewport.camera = cam
+        viewport.refresh()
+        applied = viewport.camera
+        return {
+            "eye": [applied.eye.x, applied.eye.y, applied.eye.z],
+            "target": [applied.target.x, applied.target.y, applied.target.z],
+            "view_extents": applied.viewExtents,
+            "requested_extents": radius * 1.1,
+        }
+
+    @staticmethod
+    def _capture(viewport, width: int, height: int) -> bytes:
+        width = max(16, min(int(width), 4096))
+        height = max(16, min(int(height), 4096))
+        fd, path = tempfile.mkstemp(suffix=".png", prefix="fusion_render_")
+        os.close(fd)
+        try:
+            if not viewport.saveAsImageFile(path, width, height):
+                raise RuntimeError("saveAsImageFile returned false")
+            with open(path, "rb") as f:
+                return f.read()
+        finally:
+            os.remove(path)
 
     def _orient_camera(self, viewport, spec):
         """Position the camera at a canonical view relative to the model.

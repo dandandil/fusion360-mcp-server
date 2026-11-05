@@ -288,3 +288,36 @@ def test_failing_item_without_snapshot_refs_is_reported():
     timeline.item(1)._health = 2
     report = graph.check_references(timeline, snapshot, lambda n: body)
     assert report == [{"name": "Fillet1", "health": "error", "lost": {}}]
+
+
+# ── focus helpers ────────────────────────────────────────────────────
+
+
+def _box(lo, hi):
+    return Obj("BoundingBox3D", minPoint=_point(*lo), maxPoint=_point(*hi))
+
+
+def test_features_near_uses_face_boxes():
+    big_face = Obj("BRepFace", boundingBox=_box((-10, -10, 0), (10, 10, 0)))
+    far_face = Obj("BRepFace", boundingBox=_box((50, 50, 50), (51, 51, 51)))
+    plate = Obj("ExtrudeFeature", faces=Collection([big_face]))
+    boss = Obj("ExtrudeFeature", faces=Collection([far_face]))
+    sketch = Obj("Sketch", boundingBox=_box((0, 0, 2), (1, 1, 2)))
+    timeline = Collection(
+        [
+            TimelineObject(0, "Plate", plate),
+            TimelineObject(1, "Boss", boss),
+            TimelineObject(2, "Sketch3", sketch),
+        ]
+    )
+    found = graph.features_near(timeline, [9, 9, 1], radius=2)
+    assert [(f["name"], f["distance"]) for f in found] == [("Plate", 1.0)]
+    found = graph.features_near(timeline, [0.5, 0.5, 1.5], radius=1.5)
+    assert [f["name"] for f in found] == ["Sketch3", "Plate"]
+
+
+def test_list_timeline_filters_by_name_and_type(timeline):
+    by_name = graph.list_timeline(timeline, name_contains="extrude")["items"]
+    assert [i["name"] for i in by_name] == ["Extrude1", "Extrude2"]
+    by_type = graph.list_timeline(timeline, types=["Sketch"])["items"]
+    assert [i["name"] for i in by_type] == ["Sketch1", "Sketch2"]
