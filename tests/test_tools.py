@@ -83,6 +83,18 @@ def test_expected_tools_present():
         # scene control
         "delete_all",
         "undo",
+        # jobs, timeline control, intent, development
+        "start_job",
+        "get_job",
+        "dry_run",
+        "set_timeline_marker",
+        "compute_all",
+        "recreate_feature",
+        "snapshot_references",
+        "check_references",
+        "set_design_note",
+        "get_design_notes",
+        "reload_handler",
         # history
         "create_checkpoint",
         "list_checkpoints",

@@ -111,8 +111,6 @@ def _extract_command_dispatch_keys(path: Path) -> set[str]:
     raise AssertionError(f"_COMMANDS dict literal not found in {path}")
 
 
-# Commands the add-in dispatches that are intentionally not MCP tools.
-_DISPATCH_ONLY = {"reload_handler"}
 ADDON_SERVER = REPO_ROOT / "addon" / "server"
 
 
@@ -133,8 +131,10 @@ def _extract_module_frozenset(path: Path, name: str) -> set[str]:
 
 
 def _bridge_commands() -> set[str]:
-    return _extract_module_frozenset(
-        ADDON_SERVER / "event_bridge.py", "BRIDGE_COMMANDS"
+    """Commands EventBridge answers itself (main or socket thread)."""
+    path = ADDON_SERVER / "event_bridge.py"
+    return _extract_module_frozenset(path, "BRIDGE_COMMANDS") | (
+        _extract_module_frozenset(path, "SOCKET_COMMANDS")
     )
 
 
@@ -151,7 +151,7 @@ def test_tools_match_addon_dispatch():
     dispatch = (
         _extract_command_dispatch_keys(ADDON_SERVER / "command_handler.py")
         | _bridge_commands()
-    ) - _DISPATCH_ONLY
+    )
     assert tool_names == dispatch, (
         f"tools.py and the add-in dispatch have drifted.\n"
         f"  tools without handler: {sorted(tool_names - dispatch)}\n"

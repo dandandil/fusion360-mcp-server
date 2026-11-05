@@ -59,6 +59,8 @@ _MUTATION_MOCKS: frozenset[str] = frozenset(
         "auto_constrain",
         "create_ucs",
         "set_color",
+        "set_timeline_marker",
+        "recreate_feature",
     }
 )
 
@@ -444,6 +446,95 @@ def _get_feature_info(p: dict) -> dict:
 def _get_dependents(p: dict) -> dict:
     found = [{"name": "Extrude1", "index": 1, "via": [p.get("name", "Sketch1")]}]
     return {"name": p.get("name", "Sketch1"), "dependents": found, "count": 1}
+
+
+def _start_job(p: dict) -> dict:
+    return {"job_id": "mock0001", "tool": p.get("tool", "?")}
+
+
+def _get_job(p: dict) -> dict:
+    return {
+        "job_id": p.get("job_id", "mock0001"),
+        "tool": "compute_all",
+        "state": "done",
+        "elapsed_s": 0.1,
+        "completed": True,
+        "problems": {},
+    }
+
+
+def _dry_run(p: dict) -> dict:
+    return {
+        "tool": p.get("tool", "?"),
+        "rolled_back": True,
+        "dry_run": {
+            "new_problems": {"Fillet1": {"health": "error", "message": "edge lost"}},
+            "resolved_problems": [],
+        },
+    }
+
+
+def _set_timeline_marker(_p: dict) -> dict:
+    return {"marker_position": 1, "count": 2, "problems": {}}
+
+
+def _compute_all(_p: dict) -> dict:
+    return {"completed": True, "problems": {}}
+
+
+def _recreate_feature(p: dict) -> dict:
+    return {
+        "recreated": p.get("name", "OffsetFaces1"),
+        "type": "OffsetFacesFeature",
+        "index": 1,
+        "health": "healthy",
+        "message": "",
+        "settings": {"distance": "1 mm"},
+        "problems": {},
+    }
+
+
+def _snapshot_references(_p: dict) -> dict:
+    return {"items": 1, "references": 1}
+
+
+def _check_references(_p: dict) -> dict:
+    return {
+        "affected": [
+            {
+                "name": "Fillet1",
+                "health": "error",
+                "lost": {
+                    "edgeSets": [
+                        {
+                            "was": {"kind": "edge", "body": "Body1", "at": [0, 0, 1]},
+                            "candidates": [
+                                {
+                                    "index": 4,
+                                    "at": [0, 0, 1.1],
+                                    "size": 2.0,
+                                    "distance": 0.1,
+                                }
+                            ],
+                        }
+                    ]
+                },
+            }
+        ],
+        "count": 1,
+    }
+
+
+def _set_design_note(p: dict) -> dict:
+    return {"key": p.get("key", "k"), "value": p.get("value", "")}
+
+
+def _get_design_notes(_p: dict) -> dict:
+    return {"notes": {"assembly": "motor is mounted before the motor mount"}}
+
+
+def _reload_handler(_p: dict) -> dict:
+    return {"reloaded": True}
 
 
 def _export_step(p: dict) -> dict:
@@ -1112,6 +1203,17 @@ _DISPATCH: dict[str, Any] = {
     "get_timeline": _get_timeline,
     "get_feature_info": _get_feature_info,
     "get_dependents": _get_dependents,
+    "start_job": _start_job,
+    "get_job": _get_job,
+    "dry_run": _dry_run,
+    "set_timeline_marker": _set_timeline_marker,
+    "compute_all": _compute_all,
+    "recreate_feature": _recreate_feature,
+    "snapshot_references": _snapshot_references,
+    "check_references": _check_references,
+    "set_design_note": _set_design_note,
+    "get_design_notes": _get_design_notes,
+    "reload_handler": _reload_handler,
     "export_step": _export_step,
     "export_f3d": _export_f3d,
     "export_view_sheet": _export_view_sheet,

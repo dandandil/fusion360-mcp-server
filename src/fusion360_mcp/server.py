@@ -22,6 +22,7 @@ from .connection import (
     get_connection,
     reset_connection,
 )
+from .guide import INSTRUCTIONS, edit_model_prompt
 from .mock import mock_command
 from .tools import get_tool_by_name, get_tool_list
 
@@ -182,7 +183,7 @@ def _format_result(
 def main(mode: str, host: str, port: int) -> int:
     """Fusion360 MCP Server — connects Claude to Fusion 360."""
 
-    app = Server("fusion360-mcp-server")
+    app = Server("fusion360-mcp-server", instructions=INSTRUCTIONS)
 
     # ── tools ────────────────────────────────────────────────────────
 
@@ -344,6 +345,20 @@ def main(mode: str, host: str, port: int) -> int:
     # ── prompts ───────────────────────────────────────────────────────
 
     _PROMPTS = {
+        "edit-existing-model": types.Prompt(
+            name="edit-existing-model",
+            description=(
+                "Change an existing model safely: read its features first, "
+                "edit in place, recompute in steps"
+            ),
+            arguments=[
+                types.PromptArgument(
+                    name="task",
+                    description="What to change, e.g. 'mount the motor with 4 screws'",
+                    required=True,
+                ),
+            ],
+        ),
         "create-box": types.Prompt(
             name="create-box",
             description=("Guide for creating a parametric box in Fusion 360"),
@@ -415,7 +430,9 @@ def main(mode: str, host: str, port: int) -> int:
             raise ValueError(f"Unknown prompt: {name}")
         args = arguments or {}
 
-        if name == "create-box":
+        if name == "edit-existing-model":
+            text = edit_model_prompt(args.get("task", ""))
+        elif name == "create-box":
             length = args.get("length", "10")
             width = args.get("width", "5")
             height = args.get("height", "3")

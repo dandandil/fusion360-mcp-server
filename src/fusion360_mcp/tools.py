@@ -327,6 +327,171 @@ TOOLS: list[dict] = [
             "properties": {},
         },
     },
+    # ── jobs & dry runs ──────────────────────────────────────────────
+    {
+        "name": "start_job",
+        "title": "Start Job",
+        "description": (
+            "Run any tool in the background and return a job_id at once. Use "
+            "for calls that may exceed the 30 s timeout (set_parameter on a "
+            "big model, compute_all, dry_run). Poll with get_job."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["tool"],
+            "properties": {
+                "tool": {"type": "string", "description": "Tool name"},
+                "params": {"type": "object", "description": "Tool arguments"},
+            },
+        },
+    },
+    {
+        "name": "get_job",
+        "title": "Get Job",
+        "description": (
+            "State of a job from start_job: 'running', or 'done' with the "
+            "tool's own result (an error result if the tool failed)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["job_id"],
+            "properties": {"job_id": {"type": "string"}},
+        },
+    },
+    {
+        "name": "dry_run",
+        "title": "Dry Run",
+        "description": (
+            "Apply a design-editing tool, report how timeline problems "
+            "changed (new_problems, resolved_problems), then roll everything "
+            "back. Use before risky parameter or feature edits; wrap in "
+            "start_job when the recompute is slow."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["tool"],
+            "properties": {
+                "tool": {"type": "string", "description": "Tool name"},
+                "params": {"type": "object", "description": "Tool arguments"},
+            },
+        },
+    },
+    # ── timeline control & references ────────────────────────────────
+    {
+        "name": "set_timeline_marker",
+        "title": "Set Timeline Marker",
+        "description": (
+            "Move the timeline marker: to an index (position), before or "
+            "after a named item, or to the end. Items after the marker are "
+            "not computed, so edits recompute only up to it. Returns the "
+            "current timeline problems. Blocks rollback_to_checkpoint across "
+            "it (undo behaviour of marker moves is not tracked)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "position": {"type": "integer"},
+                "before": {"type": "string", "description": "Item name"},
+                "after": {"type": "string", "description": "Item name"},
+                "end": {"type": "boolean", "default": False},
+            },
+        },
+    },
+    {
+        "name": "compute_all",
+        "title": "Compute All",
+        "description": (
+            "Recompute the whole design and return timeline problems. Slow "
+            "on big models: run it with start_job."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "recreate_feature",
+        "title": "Recreate Feature",
+        "description": (
+            "Rebuild a feature whose inputs the API cannot change, at the "
+            "same timeline position and with the same name and values: "
+            "OffsetFacesFeature with new faces (face_points, cm, one point "
+            "on each face) or SweepFeature with a new profile "
+            "(profile_sketch, profile_index; same path). Items that "
+            "referenced the old feature's faces may break: run "
+            "snapshot_references before and check_references after."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+                "name": {"type": "string", "description": "Timeline item name"},
+                "face_points": {
+                    "type": "array",
+                    "items": {"type": "array", "items": {"type": "number"}},
+                },
+                "profile_sketch": {"type": "string"},
+                "profile_index": {"type": "integer", "default": 0},
+                "tolerance": {
+                    "type": "number",
+                    "description": "Face search radius, cm",
+                    "default": 0.01,
+                },
+            },
+        },
+    },
+    {
+        "name": "snapshot_references",
+        "title": "Snapshot References",
+        "description": (
+            "Remember every face/edge input of the timeline (location and "
+            "size) so check_references can tell which ones an edit lost."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "check_references",
+        "title": "Check References",
+        "description": (
+            "After an edit: items whose face/edge inputs from the last "
+            "snapshot_references are gone or that now fail, with up to 3 "
+            "candidate faces/edges of the same body nearest to the old "
+            "location (index, location, size)."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    # ── design intent ────────────────────────────────────────────────
+    {
+        "name": "set_design_note",
+        "title": "Set Design Note",
+        "description": (
+            "Store a design-intent note in the model (Fusion attributes), "
+            "e.g. key='assembly', value='motor is mounted before the motor "
+            "mount'. An empty value deletes the note."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["key", "value"],
+            "properties": {
+                "key": {"type": "string"},
+                "value": {"type": "string"},
+            },
+        },
+    },
+    {
+        "name": "get_design_notes",
+        "title": "Get Design Notes",
+        "description": "Design-intent notes stored in the model.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    # ── development ──────────────────────────────────────────────────
+    {
+        "name": "reload_handler",
+        "title": "Reload Handler",
+        "description": (
+            "Reload the add-in's command modules after copying a new add-in "
+            "version, without restarting Fusion. Bridge, transactions and "
+            "history are not reloaded (restart the add-in for those)."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
     # ── history ──────────────────────────────────────────────────────
     {
         "name": "create_checkpoint",
@@ -2556,8 +2721,18 @@ _READ_ONLY = {
     "get_design_type",
     "render_view",
     "list_checkpoints",
+    "get_job",
+    "get_design_notes",
+    "snapshot_references",
+    "check_references",
 }
-_DESTRUCTIVE = {"delete_all", "delete_parameter", "rollback_to_checkpoint"}
+_DESTRUCTIVE = {
+    "delete_all",
+    "delete_parameter",
+    "rollback_to_checkpoint",
+    "recreate_feature",
+    "start_job",
+}
 _IDEMPOTENT = {
     "ping",
     "get_scene_info",
@@ -2584,6 +2759,14 @@ _IDEMPOTENT = {
     "rename_body",
     "render_view",
     "list_checkpoints",
+    "get_job",
+    "get_design_notes",
+    "snapshot_references",
+    "check_references",
+    "set_design_note",
+    "set_timeline_marker",
+    "compute_all",
+    "reload_handler",
 }
 
 for _t in TOOLS:

@@ -112,6 +112,10 @@ class TestToolAnnotations:
             "get_design_type",
             "render_view",
             "list_checkpoints",
+            "get_job",
+            "get_design_notes",
+            "snapshot_references",
+            "check_references",
         }
         for t in TOOLS:
             ann = t["annotations"]
@@ -125,7 +129,13 @@ class TestToolAnnotations:
     def test_destructive_tools(self):
         from fusion360_mcp.tools import TOOLS
 
-        destructive = {"delete_all", "delete_parameter", "rollback_to_checkpoint"}
+        destructive = {
+            "delete_all",
+            "delete_parameter",
+            "rollback_to_checkpoint",
+            "recreate_feature",
+            "start_job",
+        }
         for t in TOOLS:
             ann = t["annotations"]
             if t["name"] in destructive:
@@ -185,6 +195,29 @@ class TestMCPPrompts:
         )
         assert desig in text
         assert "create_thread" in text
+
+
+class TestGuide:
+    """Agent rules must only name tools that exist."""
+
+    def test_instructions_name_real_tools(self):
+        import re
+
+        from fusion360_mcp.guide import EDIT_MODEL_STEPS, INSTRUCTIONS
+        from fusion360_mcp.tools import TOOLS
+
+        names = {t["name"] for t in TOOLS}
+        mentioned = set(re.findall(r"\b[a-z]+(?:_[a-z]+)+\b", INSTRUCTIONS))
+        assert mentioned - {"problems_only", "rolled_back"} <= names
+        assert set(EDIT_MODEL_STEPS) <= names
+        assert set(EDIT_MODEL_STEPS) <= mentioned
+
+    def test_edit_prompt_includes_task_and_rules(self):
+        from fusion360_mcp.guide import INSTRUCTIONS, edit_model_prompt
+
+        text = edit_model_prompt("widen the motor mount")
+        assert "widen the motor mount" in text
+        assert INSTRUCTIONS in text
 
 
 class TestResourceTemplates:

@@ -77,11 +77,13 @@ class _CommandDefinition:
                 continue
             command = _Command()
             timeline_before = self._app.timeline.count
+            problems_before = dict(self._app.problems)
             self.commandCreated.fire(_Args(command))
             args = _Args(command)
             command.execute.fire(args)
             if args.executeFailed:
                 self._app.timeline.count = timeline_before
+                self._app.problems = problems_before
             else:
                 self.undo_names.append(self.name)
             self.failed.append(args.executeFailed)
@@ -141,6 +143,7 @@ class _App:
     def __init__(self):
         self.userInterface = _UI(self)
         self.timeline = types.SimpleNamespace(count=0)
+        self.problems = {}
         self.activeDocument = types.SimpleNamespace(
             name="Doc1", products=_Products(_Design(self.timeline))
         )
@@ -170,12 +173,18 @@ class _Handler:
         self._app = app
         self.calls = []
 
+    def timeline_problems(self):
+        return dict(self._app.problems)
+
     def execute_command(self, command):
         self.calls.append(command["type"])
-        if command.get("params", {}).get("fail"):
+        params = command.get("params", {})
+        if params.get("breaks"):
+            self._app.problems[params["breaks"]] = {"health": "error"}
+        if params.get("fail"):
             self._app.timeline.count += 1  # partial edit before the failure
             return {"status": "success", "result": {"ok": False, "error_kind": "X"}}
-        if command["type"] not in ("get_scene_info",):
+        if command["type"] not in ("get_scene_info", "set_timeline_marker"):
             self._app.timeline.count += 1
         return {"status": "success", "result": {"ok": True}}
 
@@ -434,3 +443,69 @@ def test_undo_past_checkpoint_drops_it(setup):
     _call(setup, "create_checkpoint", name="cp")
     setup.app.userInterface.commandDefinitions.itemById(UNDO).execute()
     assert _call(setup, "list_checkpoints")["checkpoints"] == []
+
+
+
+# ── jobs, dry runs, untracked edits ──────────────────────────────────
+
+
+def test_dry_run_reports_problems_and_rolls_back(setup):
+    result = _call(setup, "dry_run", tool="set_parameter", params={"breaks": "Fillet1"})
+    assert result["rolled_back"] is True
+    assert result["dry_run"]["new_problems"] == {"Fillet1": {"health": "error"}}
+    assert setup.cmd_def.failed == [True]
+    assert setup.app.timeline.count == 0
+    assert setup.app.problems == {}
+    assert _call(setup, "list_checkpoints")["journal"] == []
+
+
+def test_dry_run_rejects_read_only_tool(setup):
+    response = setup.bridge.submit(
+        {"type": "dry_run", "params": {"tool": "get_scene_info"}}
+    )
+    assert response["result"]["error_kind"] == "INVALID_INPUT"
+
+
+def test_job_returns_at_once_and_reports_result(setup):
+    started = setup.bridge.submit(
+        {"type": "start_job", "params": {"tool": "extrude", "params": {}}}
+    )["result"]
+    job = {"type": "get_job", "params": {"job_id": started["job_id"]}}
+    assert setup.bridge.submit(job)["result"]["state"] == "running"
+    setup.bridge.drain_queue()
+    setup.cmd_def.run_scheduled()
+    done = setup.bridge.submit(job)["result"]
+    assert done["state"] == "done"
+    assert done["ok"] is True
+    assert done["tool"] == "extrude"
+
+
+def test_job_can_wrap_a_dry_run(setup):
+    started = setup.bridge.submit(
+        {
+            "type": "start_job",
+            "params": {"tool": "dry_run", "params": {"tool": "extrude"}},
+        }
+    )["result"]
+    setup.bridge.drain_queue()
+    setup.cmd_def.run_scheduled()
+    done = setup.bridge.submit(
+        {"type": "get_job", "params": {"job_id": started["job_id"]}}
+    )["result"]
+    assert done["rolled_back"] is True
+    assert setup.app.timeline.count == 0
+
+
+def test_unknown_job(setup):
+    response = setup.bridge.submit({"type": "get_job", "params": {"job_id": "x"}})
+    assert response["result"]["error_kind"] == "INVALID_INPUT"
+
+
+def test_marker_move_blocks_rollback(setup):
+    _call(setup, "create_checkpoint", name="cp")
+    _call(setup, "extrude")
+    _call(setup, "set_timeline_marker", position=0)
+    assert setup.cmd_def.undo_names == ["MCP: extrude"]  # marker: no transaction
+    result = _call(setup, "rollback_to_checkpoint", name="cp")
+    assert result["error_kind"] == "HISTORY_CONFLICT"
+    assert "untracked:set_timeline_marker" in result["error_message"]

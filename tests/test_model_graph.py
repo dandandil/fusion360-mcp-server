@@ -197,3 +197,94 @@ def test_body_links_are_opt_in(timeline):
 def test_unknown_item_raises(timeline):
     with pytest.raises(RuntimeError, match="not found"):
         graph.dependents(graph.build_graph(timeline), "Nope")
+
+
+# ── reference snapshot / check ───────────────────────────────────────
+
+
+def _point(x, y, z):
+    return Obj("Point3D", x=x, y=y, z=z)
+
+
+def _edge(body, faces, at, length):
+    box = Obj("BoundingBox3D", minPoint=_point(*at), maxPoint=_point(*at))
+    return Obj("BRepEdge", body=body, faces=faces, boundingBox=box, length=length)
+
+
+def _face(body, token, at):
+    return Obj("BRepFace", entityToken=token, body=body, centroid=_point(*at), area=4.0)
+
+
+def _filleted_model():
+    """Extrude1 makes f1/f2; Fillet1 rounds their shared edge at z=1."""
+    body = Obj("BRepBody", name="Body1")
+    f1 = _face(body, "f1", (0, 0, 1))
+    f2 = _face(body, "f2", (1, 0, 0))
+    edge = _edge(body, Collection([f1, f2]), (1, 0, 1), 2.0)
+    body.faces = Collection([f1, f2])
+    body.edges = Collection([_edge(body, Collection([]), (1, 0, 1.2), 2.0), edge])
+    extrude = Obj(
+        "ExtrudeFeature",
+        name="Extrude1",
+        bodies=Collection([body]),
+        faces=Collection([f1, f2]),
+    )
+    edge_set = Obj("ConstantRadiusFilletEdgeSet", edges=Collection([edge]))
+    fillet = Obj(
+        "FilletFeature",
+        name="Fillet1",
+        edgeSets=Collection([edge_set]),
+        bodies=Collection([body]),
+        faces=Collection([]),
+    )
+    items = [
+        TimelineObject(0, "Extrude1", extrude),
+        TimelineObject(1, "Fillet1", fillet),
+    ]
+    timeline = Collection(items)
+    timeline.markerPosition = 2
+    return timeline, body, edge_set
+
+
+def test_refs_carry_geometry():
+    timeline, _, _ = _filleted_model()
+    snapshot = graph.reference_snapshot(timeline)
+    ref = snapshot["Fillet1"]["edgeSets"][0]
+    assert ref["at"] == [1, 0, 1]
+    assert ref["size"] == 2.0
+    assert ref["created_by"] == ["Extrude1"]
+
+
+def test_unchanged_model_has_no_lost_references():
+    timeline, body, _ = _filleted_model()
+    snapshot = graph.reference_snapshot(timeline)
+    assert graph.check_references(timeline, snapshot, lambda n: body) == []
+
+
+def test_lost_edge_reports_nearest_candidates():
+    timeline, body, edge_set = _filleted_model()
+    snapshot = graph.reference_snapshot(timeline)
+    edge_set.edges = Collection([])  # recompute dropped the edge
+    timeline.item(1)._health = 2
+    timeline.item(1)._message = "edge lost"
+
+    report = graph.check_references(timeline, snapshot, lambda n: body)
+    assert len(report) == 1
+    item = report[0]
+    assert (item["name"], item["health"], item["message"]) == (
+        "Fillet1",
+        "error",
+        "edge lost",
+    )
+    lost = item["lost"]["edgeSets"][0]
+    assert lost["was"]["at"] == [1, 0, 1]
+    assert [c["index"] for c in lost["candidates"]] == [1, 0]
+    assert lost["candidates"][1]["distance"] == 0.2
+
+
+def test_failing_item_without_snapshot_refs_is_reported():
+    timeline, body, _ = _filleted_model()
+    snapshot = graph.reference_snapshot(timeline)
+    timeline.item(1)._health = 2
+    report = graph.check_references(timeline, snapshot, lambda n: body)
+    assert report == [{"name": "Fillet1", "health": "error", "lost": {}}]

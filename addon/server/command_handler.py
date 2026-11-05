@@ -110,6 +110,9 @@ class CommandHandler:
             # construction geometry / appearance
             "create_ucs",
             "set_color",
+            # timeline
+            "set_timeline_marker",
+            "recreate_feature",
         }
     )
 
@@ -126,6 +129,13 @@ class CommandHandler:
                 "get_timeline": self.get_timeline,
                 "get_feature_info": self.get_feature_info,
                 "get_dependents": self.get_dependents,
+                "set_timeline_marker": self.set_timeline_marker,
+                "compute_all": self.compute_all,
+                "recreate_feature": self.recreate_feature,
+                "snapshot_references": self.snapshot_references,
+                "check_references": self.check_references,
+                "set_design_note": self.set_design_note,
+                "get_design_notes": self.get_design_notes,
                 # sketch
                 "create_sketch": self.create_sketch,
                 "draw_rectangle": self.draw_rectangle,
@@ -594,6 +604,209 @@ class CommandHandler:
                 }
             )
         return params
+
+    def timeline_problems(self) -> dict:
+        """{name: {"health", "message"}} of timeline warnings/errors."""
+        design = self._design()
+        if design.designType != adsk.fusion.DesignTypes.ParametricDesignType:
+            return {}
+        items = _graph.list_timeline(design.timeline, limit=None, problems_only=True)
+        return {
+            i["name"]: {"health": i["health"], "message": i.get("message", "")}
+            for i in items["items"]
+        }
+
+    def set_timeline_marker(
+        self,
+        position: int = None,
+        before: str = None,
+        after: str = None,
+        end: bool = False,
+    ):
+        timeline = self._timeline()
+        if before or after:
+            tl_obj = _graph.find_timeline_object(timeline, before or after)
+            moved = tl_obj.rollTo(bool(before))
+        elif end:
+            moved = timeline.moveToEnd()
+        elif position is not None:
+            timeline.markerPosition = position
+            moved = timeline.markerPosition == position
+        else:
+            raise RuntimeError("Pass position, before, after or end=true")
+        if not moved:
+            raise RuntimeError("Fusion refused to move the timeline marker")
+        problems = self.timeline_problems()
+        return {
+            "marker_position": timeline.markerPosition,
+            "count": timeline.count,
+            "problems": problems,
+        }
+
+    def compute_all(self):
+        completed = self._design().computeAll()
+        problems = self.timeline_problems()
+        return {"completed": completed, "problems": problems}
+
+    # Feature types recreate_feature can rebuild; the API cannot change
+    # their inputs in place (OffsetFacesFeature faces, SweepFeature profile)
+    _RECREATABLE = ("OffsetFacesFeature", "SweepFeature")
+
+    def recreate_feature(
+        self,
+        name: str,
+        face_points: list = None,
+        profile_sketch: str = None,
+        profile_index: int = 0,
+        tolerance: float = 0.01,
+    ):
+        """Rebuild a feature at the same timeline position with new inputs."""
+        timeline = self._timeline()
+        tl_obj = _graph.find_timeline_object(timeline, name)
+        old = tl_obj.entity
+        kind = _graph.short_type(old)
+        if kind not in self._RECREATABLE:
+            raise RuntimeError(
+                f"recreate_feature supports {', '.join(self._RECREATABLE)}, "
+                f"not {kind}; edit its inputs directly"
+            )
+        marker_at_end = timeline.markerPosition == timeline.count
+        marker = timeline.markerPosition
+        component = old.parentComponent
+        # Inputs of a rolled-back feature are unreliable: read them first
+        if kind == "OffsetFacesFeature":
+            if not face_points:
+                raise RuntimeError("Pass face_points: one [x, y, z] (cm) per face")
+            params = self._parameters_created_by(old)
+            if not params:
+                raise RuntimeError(f"{name} has no distance parameter to copy")
+            settings = {"distance": params[0]["expression"]}
+        else:
+            if not profile_sketch:
+                raise RuntimeError("Pass profile_sketch (and profile_index)")
+            settings = self._sweep_settings(old)
+
+        if not tl_obj.rollTo(True):
+            raise RuntimeError(f"Could not roll the timeline to before {name}")
+        if kind == "OffsetFacesFeature":
+            faces = self._faces_at(component, face_points, tolerance)
+            new = component.features.offsetFacesFeatures.add(
+                component.features.offsetFacesFeatures.createInput(
+                    faces, adsk.core.ValueInput.createByString(settings["distance"])
+                )
+            )
+        else:
+            profile = self._sketch_by_name(profile_sketch).profiles.item(profile_index)
+            new = self._create_sweep(component, profile, settings)
+        if not old.deleteMe():
+            raise RuntimeError(f"Could not delete the original {name}")
+        new.name = name
+        if marker_at_end:
+            timeline.moveToEnd()
+        else:
+            timeline.markerPosition = marker
+
+        entry = _graph.timeline_entry(new.timelineObject)
+        return {
+            "recreated": name,
+            "type": kind,
+            "index": entry["index"],
+            "health": entry["health"],
+            "message": entry.get("message", ""),
+            "settings": {k: v for k, v in settings.items() if k != "path"},
+            "problems": self.timeline_problems(),
+        }
+
+    _SWEEP_VALUES = ("distanceOne", "distanceTwo", "taperAngle", "twistAngle")
+
+    def _sweep_settings(self, sweep) -> dict:
+        if sweep.guideRail is not None:
+            raise RuntimeError("Sweeps with a guide rail are not supported yet")
+        settings = {
+            "path": [sweep.path.item(i).entity for i in range(sweep.path.count)],
+            "operation": sweep.operation,
+            "orientation": sweep.orientation,
+        }
+        for attr in self._SWEEP_VALUES:
+            value = getattr(sweep, attr)
+            if value is not None:
+                settings[attr] = value.expression
+        return settings
+
+    def _create_sweep(self, component, profile, settings):
+        curves = adsk.core.ObjectCollection.create()
+        for entity in settings["path"]:
+            curves.add(entity)
+        sweeps = component.features.sweepFeatures
+        inp = sweeps.createInput(
+            profile,
+            component.features.createPath(curves, False),
+            settings["operation"],
+        )
+        inp.orientation = settings["orientation"]
+        for attr in self._SWEEP_VALUES:
+            if attr in settings:
+                expression = settings[attr]
+                setattr(inp, attr, adsk.core.ValueInput.createByString(expression))
+        return sweeps.add(inp)
+
+    @staticmethod
+    def _faces_at(component, points: list, tolerance: float) -> list:
+        faces = []
+        for point in points:
+            found = component.findBRepUsingPoint(
+                adsk.core.Point3D.create(*point),
+                adsk.fusion.BRepEntityTypes.BRepFaceEntityType,
+                tolerance,
+                False,
+            )
+            if found.count == 0:
+                raise RuntimeError(f"No face within {tolerance} cm of {point}")
+            faces.append(found.item(0))
+        return faces
+
+    def snapshot_references(self):
+        snapshot = _graph.reference_snapshot(self._timeline())
+        self._reference_snapshot = snapshot
+        refs = sum(len(r) for attrs in snapshot.values() for r in attrs.values())
+        return {"items": len(snapshot), "references": refs}
+
+    def check_references(self):
+        snapshot = getattr(self, "_reference_snapshot", None)
+        if snapshot is None:
+            raise RuntimeError("Call snapshot_references before the edit")
+        report = _graph.check_references(self._timeline(), snapshot, self._body_or_none)
+        return {"affected": report, "count": len(report)}
+
+    def _body_or_none(self, name: str):
+        try:
+            return self._body_by_name(name)
+        except RuntimeError:
+            return None
+
+    # Design intent stored in the model (assembly order, print settings, ...)
+    NOTES_GROUP = "fusion360mcp.intent"
+
+    def set_design_note(self, key: str, value: str):
+        attributes = self._design().attributes
+        if value:
+            attributes.add(self.NOTES_GROUP, key, value)
+            return {"key": key, "value": value}
+        attribute = attributes.itemByName(self.NOTES_GROUP, key)
+        if attribute is None:
+            raise RuntimeError(f"No design note '{key}'")
+        attribute.deleteMe()
+        return {"key": key, "deleted": True}
+
+    def get_design_notes(self):
+        attributes = self._design().attributes
+        if self.NOTES_GROUP not in attributes.groupNames:
+            return {"notes": {}}
+        return {
+            "notes": {
+                a.name: a.value for a in attributes.itemsByGroup(self.NOTES_GROUP)
+            }
+        }
 
     def list_components(self):
         root = self._root()

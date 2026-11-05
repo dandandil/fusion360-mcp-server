@@ -146,7 +146,7 @@ def list_timeline(timeline, start=0, limit=100, problems_only=False) -> dict:
         "count": timeline.count,
         "marker_position": timeline.markerPosition,
         "total_matching": len(entries),
-        "items": entries[start : start + limit],
+        "items": entries[start:] if limit is None else entries[start : start + limit],
     }
 
 
@@ -200,9 +200,11 @@ def describe_ref(obj, creators: dict) -> list[dict]:
     if kind == "BRepBody":
         return [{"kind": "body", "name": obj.name}]
     if kind == "BRepFace":
-        return [_topology_ref("face", obj.body.name, [obj], creators)]
+        ref = _topology_ref("face", obj.body.name, [obj], creators)
+        return [_with_geometry(ref, obj)]
     if kind == "BRepEdge":
-        return [_topology_ref("edge", obj.body.name, _items(obj.faces), creators)]
+        ref = _topology_ref("edge", obj.body.name, _items(obj.faces), creators)
+        return [_with_geometry(ref, obj)]
     if kind == "BRepVertex":
         return [{"kind": "vertex", "body": obj.body.name}]
     if kind.startswith("Construction"):
@@ -217,6 +219,35 @@ def _topology_ref(kind, body_name, faces, creators) -> dict:
         {creators[f.entityToken] for f in faces if f.entityToken in creators}
     )
     return {"kind": kind, "body": body_name, "created_by": features}
+
+
+def _with_geometry(ref: dict, obj) -> dict:
+    """Add where the face/edge is (cm) and its area/length, for matching."""
+    at, size = geometry_of(obj)
+    if at is not None:
+        ref["at"] = at
+        ref["size"] = size
+    return ref
+
+
+def geometry_of(obj):
+    """(centroid of a face / bbox centre of an edge, area / length)."""
+    try:
+        if short_type(obj) == "BRepFace":
+            c = obj.centroid
+            return [round(c.x, 4), round(c.y, 4), round(c.z, 4)], round(obj.area, 6)
+        box = obj.boundingBox
+        at = [
+            round((lo + hi) / 2, 4)
+            for lo, hi in zip(
+                (box.minPoint.x, box.minPoint.y, box.minPoint.z),
+                (box.maxPoint.x, box.maxPoint.y, box.maxPoint.z),
+            )
+        ]
+        return at, round(obj.length, 6)
+    except Exception as exc:
+        log.debug("geometry of %s not readable: %s", short_type(obj), exc)
+        return None, None
 
 
 def entity_inputs(entity, creators: dict) -> tuple[dict, dict]:
@@ -357,3 +388,102 @@ def dependents(graph, name, transitive=False, include_bodies=False) -> list[dict
                 if transitive:
                     frontier.append(other)
     return sorted(found.values(), key=lambda d: d["index"])
+
+
+# ----------------------------------------------------------------------
+# Reference check: which face/edge inputs were lost after an edit
+# ----------------------------------------------------------------------
+
+TOPOLOGY_KINDS = ("face", "edge")
+MATCH_TOLERANCE_CM = 1e-3
+MAX_CANDIDATES = 3
+
+
+def reference_snapshot(timeline) -> dict:
+    """{item: {property: [face/edge refs with geometry]}} of healthy items."""
+    creators = face_creators(timeline)
+    snapshot = {}
+    for i in range(timeline.count):
+        tl_obj = timeline.item(i)
+        if tl_obj.isGroup or tl_obj.isRolledBack or tl_obj.isSuppressed:
+            continue
+        if timeline_entry(tl_obj)["health"] == "error" or tl_obj.entity is None:
+            continue
+        inputs, _ = entity_inputs(tl_obj.entity, creators)
+        topology = {
+            attr: [r for r in refs if r["kind"] in TOPOLOGY_KINDS and "at" in r]
+            for attr, refs in inputs.items()
+        }
+        topology = {attr: refs for attr, refs in topology.items() if refs}
+        if topology:
+            snapshot[tl_obj.name] = topology
+    return snapshot
+
+
+def check_references(timeline, snapshot: dict, find_body) -> list[dict]:
+    """Items whose snapshotted face/edge inputs are gone, with candidates.
+
+    *find_body(name)* returns the body to search candidates in, or None.
+    """
+    creators = face_creators(timeline)
+    report = []
+    for name, old_inputs in snapshot.items():
+        try:
+            tl_obj = find_timeline_object(timeline, name)
+        except RuntimeError:
+            report.append({"name": name, "missing": True})
+            continue
+        entry = timeline_entry(tl_obj)
+        inputs, unreadable = entity_inputs(tl_obj.entity, creators)
+        lost = {}
+        for attr, old_refs in old_inputs.items():
+            current = inputs.get(attr, [])
+            gone = [r for r in old_refs if not any(_same(r, c) for c in current)]
+            if gone:
+                lost[attr] = [
+                    {"was": r, "candidates": _candidates(r, find_body)} for r in gone
+                ]
+        if lost or entry["health"] == "error":
+            item = {"name": name, "health": entry["health"], "lost": lost}
+            if "message" in entry:
+                item["message"] = entry["message"]
+            if unreadable:
+                item["unreadable"] = unreadable
+            report.append(item)
+    return report
+
+
+def _same(old: dict, new: dict) -> bool:
+    return (
+        old["kind"] == new["kind"]
+        and old["body"] == new["body"]
+        and "at" in new
+        and _distance(old["at"], new["at"]) <= MATCH_TOLERANCE_CM
+    )
+
+
+def _distance(a, b) -> float:
+    return sum((x - y) ** 2 for x, y in zip(a, b)) ** 0.5
+
+
+def _candidates(ref: dict, find_body) -> list[dict]:
+    """Nearest faces/edges of the same body now, by location then size."""
+    body = find_body(ref["body"])
+    if body is None:
+        return []
+    entities = body.faces if ref["kind"] == "face" else body.edges
+    scored = []
+    for index, entity in enumerate(_items(entities)):
+        at, size = geometry_of(entity)
+        if at is None:
+            continue
+        scored.append(
+            {
+                "index": index,
+                "at": at,
+                "size": size,
+                "distance": round(_distance(ref["at"], at), 4),
+            }
+        )
+    scored.sort(key=lambda c: (c["distance"], abs(c["size"] - ref["size"])))
+    return scored[:MAX_CANDIDATES]

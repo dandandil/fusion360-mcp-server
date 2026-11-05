@@ -5,7 +5,9 @@ The API cannot read Fusion's undo list, so the journal mirrors it: MCP
 transactions are recorded by the bridge, every other completed command
 (UI edits, scripts) is seen via ``UserInterface.commandTerminated`` and
 recorded as foreign.  Undo pops the newest entry; redo cannot be mirrored
-reliably and is recorded as foreign too.
+reliably and is recorded as foreign too.  MCP edits made outside a
+transaction (marker moves) are recorded as untracked: their undo behaviour
+is unknown, so they block rollback like foreign entries.
 
 Rollback to a checkpoint undoes the MCP steps after it, and refuses when
 foreign entries are in the way or the timeline count shows an edit the
@@ -23,8 +25,12 @@ UNDO_COMMAND_ID = "UndoCommand"
 # Commands that complete without adding an undo step
 IGNORED_COMMAND_IDS = frozenset({"SelectCommand"})
 
+# MCP commands that may edit the design outside a transaction
+UNTRACKED_EDIT_COMMANDS = frozenset({"set_timeline_marker"})
+
 MCP = "mcp"
 FOREIGN = "foreign"
+UNTRACKED = "untracked"
 
 
 class HistoryError(Exception):
@@ -66,6 +72,9 @@ class History:
 
     def record_step(self, tool: str):
         self._append(MCP, tool)
+
+    def record_untracked(self, tool: str):
+        self._append(UNTRACKED, tool)
 
     def on_command_terminated(self, command_id: str, reason):
         completed = adsk.core.CommandTerminationReason.CompletedTerminationReason
@@ -138,10 +147,10 @@ class History:
                 ["activate that document first"],
             )
         steps = self._entries[cp["position"] :]
-        foreign = [e["name"] for e in steps if e["kind"] == FOREIGN]
-        if foreign and not force:
+        blocking = [f"{e['kind']}:{e['name']}" for e in steps if e["kind"] != MCP]
+        if blocking and not force:
             raise HistoryError(
-                f"Edits made outside MCP since '{name}': {foreign}",
+                f"Steps not made by MCP transactions since '{name}': {blocking}",
                 "HISTORY_CONFLICT",
                 [
                     "undo them in the Fusion UI first",

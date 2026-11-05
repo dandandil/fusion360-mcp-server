@@ -5,6 +5,9 @@ Edits made in a Command's execute handler form a single undo step named
 after the command; setting ``executeFailed`` aborts that step and rolls
 the edits back.  ``CommandDefinition.execute()`` is deferred until the
 current event handler returns, so completion is reported via callback.
+
+A dry run (command flagged ``dry_run``) is always rolled back; its result
+reports how timeline problems changed while the edit was applied.
 """
 
 import time
@@ -34,6 +37,9 @@ NON_TRANSACTIONAL_COMMANDS = frozenset(
         "get_timeline",
         "get_feature_info",
         "get_dependents",
+        "get_design_notes",
+        "snapshot_references",
+        "check_references",
         "get_parameters",
         "get_physical_properties",
         "measure_distance",
@@ -45,7 +51,10 @@ NON_TRANSACTIONAL_COMMANDS = frozenset(
         "cam_list_setups",
         "cam_list_operations",
         "cam_get_operation_info",
-        # drive the UI or wait on Fusion
+        # drive the UI or wait on Fusion; marker moves are journaled as
+        # untracked by the bridge (their undo behaviour is unverified)
+        "set_timeline_marker",
+        "compute_all",
         "undo",
         "set_design_type",
         "export",
@@ -63,6 +72,17 @@ NON_TRANSACTIONAL_COMMANDS = frozenset(
 
 def is_transactional(cmd_type: str) -> bool:
     return cmd_type not in NON_TRANSACTIONAL_COMMANDS
+
+
+def problem_diff(before: dict, after: dict) -> dict:
+    """Compare two {name: {"health", "message"}} maps of timeline problems."""
+    new = {
+        name: problem
+        for name, problem in after.items()
+        if before.get(name, {}).get("health") != problem.get("health")
+    }
+    resolved = sorted(name for name in before if name not in after)
+    return {"new_problems": new, "resolved_problems": resolved}
 
 
 def _is_failure(response: dict) -> bool:
@@ -102,17 +122,19 @@ class _DestroyHandler(adsk.core.CommandEventHandler):
 class TransactionRunner:
     """Runs work items one at a time, each inside its own Fusion Command.
 
-    *execute(command) -> response* does the work; *on_committed(cmd_type)* is
-    called for each successful (not rolled back) item; *on_finished()* is
-    called on the main thread once an item is done so the caller can continue.
+    *execute(command) -> response* does the work; *probe() -> problems* reads
+    timeline problems for dry runs; *on_committed(cmd_type)* is called for
+    each successful (not rolled back) item; *on_finished()* is called on the
+    main thread once an item is done so the caller can continue.
     """
 
-    def __init__(self, ui, execute, on_committed, on_finished):
+    def __init__(self, ui, execute, probe, on_committed, on_finished):
         defs = ui.commandDefinitions
         self._cmd_def = defs.itemById(COMMAND_ID) or defs.addButtonDefinition(
             COMMAND_ID, "MCP", "Fusion360MCP transaction"
         )
         self._execute = execute
+        self._probe = probe
         self._on_committed = on_committed
         self._on_finished = on_finished
         self._created_handler = _CreatedHandler(self)
@@ -174,11 +196,15 @@ class TransactionRunner:
         item = self._item
         if item is None or item.cancelled:
             return
+        dry_run = item.command.get("dry_run", False)
         try:
+            before = self._probe() if dry_run else None
             response = self._execute(item.command)
+            if dry_run and not _is_failure(response):
+                response["result"]["dry_run"] = problem_diff(before, self._probe())
         except Exception:
             response = self._error(traceback.format_exc())
-        if _is_failure(response):
+        if dry_run or _is_failure(response):
             args.executeFailed = True
             result = response.get("result")
             if isinstance(result, dict):
