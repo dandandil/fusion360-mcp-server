@@ -1,20 +1,19 @@
 # Ветка `experimental`: что добавлено поверх upstream
 
-Документ ведём мы; авторские `README.md` и `AGENTS.md` не меняем (там 93 инструмента, в ветке — 111). Обоснования решений и список непроверенного — в `TIMELINE.md`. Исходные проблемы — в `fusion-agent-notes.md`.
+Документ ведём мы; авторские `README.md` и `AGENTS.md` не меняем (там 93 инструмента, в ветке — 113). Обоснования решений и список непроверенного — в `TIMELINE.md`. Исходные проблемы — в `fusion-agent-notes.md`.
 
 ## Схема запуска
 
-Код и MCP-сервер — на PC-108-7, Fusion с add-in — на Windows. Claude Code на Windows запускает сервер через ssh с обратным туннелем к add-in:
+Код и MCP-сервер — на PC-108-7, Fusion с add-in — на Windows. На Windows два скрипта из `scripts/` (взять один раз: `scp PC-108-7:cad_experiments/fusion360-mcp-server/scripts/*.cmd $env:USERPROFILE\`):
+
+- `fusion-mcp.cmd` — запуск сервера для Claude Code: сначала `scripts/release-port.sh` на PC-108-7 закрывает сессию, оставшуюся от прошлого запуска (sshd там не замечает пропавшего клиента и держит порт 9876), потом ssh с обратным туннелем к add-in.
+- `update-addon.cmd` — заменить add-in в `%APPDATA%\Autodesk\Autodesk Fusion 360\API\AddIns\Fusion360MCP` копией из репозитория; затем в Fusion: Utilities → Add-Ins → Fusion360MCP → Stop, Run. Правки моста, транзакций и журнала подхватываются только перезапуском add-in; правки `command_handler.py`/`model_graph.py`/`sketch_info.py` — ещё и `reload_handler`.
 
 ```powershell
-claude mcp add fusion360 --scope user -- ssh -T -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -R 9876:localhost:9876 PC-108-7 "cd ~/cad_experiments/fusion360-mcp-server && .venv/bin/fusion360-mcp-server"
+claude mcp add fusion360 --scope user -- cmd /c "%USERPROFILE%\fusion-mcp.cmd"
 ```
 
-Add-in копируется в `%APPDATA%\Autodesk\Autodesk Fusion 360\API\AddIns\Fusion360MCP` (`scp -r PC-108-7:cad_experiments/fusion360-mcp-server/addon ...`). После правок `command_handler.py`/`model_graph.py` достаточно скопировать и вызвать `reload_handler`; правки моста, транзакций и журнала требуют перезапуска add-in.
-
-При подключении сервер сравнивает хеш add-in (`ping`) с `addon/` в репозитории; если они разные, каждый ответ начинается с предупреждения — скопировать add-in заново и перезапустить его.
-
-Если запуск падает с `Connection closed`, порт на PC-108-7 может держать повисший туннель прошлой сессии: `ssh PC-108-7 fuser -k 9876/tcp`, затем перезапустить Claude Code.
+При подключении сервер сравнивает хеш add-in (`ping`) с `addon/` в репозитории; если они разные, каждый ответ начинается с предупреждения — запустить `update-addon.cmd` и перезапустить add-in.
 
 Флаг `FUSION_MCP_TRANSACTIONS=0` (переменная окружения Fusion) отключает транзакции, а с ними журнал, точки отката и `dry_run`.
 

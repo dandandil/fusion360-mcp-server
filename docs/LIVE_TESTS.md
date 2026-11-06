@@ -17,17 +17,14 @@
        User daniil
    ```
    Проверка: `ssh -o BatchMode=yes PC-108-7 echo ok`.
-3. Add-in:
-   ```powershell
-   scp -r PC-108-7:cad_experiments/fusion360-mcp-server/addon "$env:APPDATA\Autodesk\Autodesk Fusion 360\API\AddIns\Fusion360MCP"
-   ```
-   Если папка `Fusion360MCP` уже есть — сначала удалить, иначе scp вложит `addon` внутрь. В Fusion: Utilities → Add-Ins → вкладка Add-Ins → Fusion360MCP → Run (и «Run on Startup»).
-4. MCP в Claude Code — команда из `docs/EXPERIMENTAL.md`, затем `claude mcp list`.
+3. Скрипты: `scp PC-108-7:cad_experiments/fusion360-mcp-server/scripts/*.cmd $env:USERPROFILE\`. Add-in: `& $env:USERPROFILE\update-addon.cmd`, в Fusion: Utilities → Add-Ins → вкладка Add-Ins → Fusion360MCP → Run (и «Run on Startup»). После каждого обновления ветки — снова `update-addon.cmd` и Stop/Run.
+4. MCP в Claude Code: `claude mcp add fusion360 --scope user -- cmd /c "%USERPROFILE%\fusion-mcp.cmd"`, затем `claude mcp list`. Если раньше был добавлен старый вариант — сначала `claude mcp remove fusion360 -s user`.
 5. Правила проекта для сессии на Windows: `ssh PC-108-7 cat cad_experiments/fusion360-mcp-server/CLAUDE.md`.
 6. Тестовая модель — **копия**, не исходный `WING_7.5_`. Для шагов 1–4 хватит нового документа с одним телом.
 
 ## 1. Связь
 
+- Закрыть Claude Code аварийно (диспетчер задач) и открыть снова: сервер подключается, повисшая сессия закрыта (`ssh PC-108-7 pgrep -af fusion360-mcp-server` — один процесс).
 - `ping`, `get_scene_info` — ответ из Fusion, не mock; `ping` возвращает `addon_hash`, предупреждения о версии нет.
 - Нарочно старый add-in (или правка в копии): каждый ответ начинается с предупреждения о версии.
 
