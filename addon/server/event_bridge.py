@@ -10,7 +10,8 @@ a Fusion Command (see transaction.py): the queue pauses while one is in
 flight because the command executes after the event handler returns.
 
 Jobs: ``start_job`` queues a command and returns at once, ``get_job`` reads
-its state from the socket thread — for recomputes longer than the timeout.
+its state from the socket thread (optionally waiting ``wait_s``); a command
+that outlives the submit timeout becomes a job by itself.
 ``dry_run`` runs a command in a transaction that is always rolled back.
 """
 
@@ -19,6 +20,7 @@ import threading
 import time
 import traceback
 import uuid
+from pathlib import Path
 
 import adsk.core
 
@@ -26,12 +28,19 @@ from . import get_logger
 from .hints import classify
 from .history import UNTRACKED_EDIT_COMMANDS, History, HistoryError
 from .transaction import COMMAND_ID, TransactionRunner, is_transactional
+from .version import addon_hash
 
 log = get_logger("bridge")
 
 CUSTOM_EVENT_ID = "Fusion360MCP_BridgeEvent"
 TIMER_INTERVAL_MS = 200  # backup polling interval
 MAX_JOBS = 50  # finished jobs kept for get_job
+MAX_JOB_WAIT_S = 120.0  # longest get_job wait_s
+
+try:
+    ADDON_HASH = addon_hash(Path(__file__).resolve().parents[1])
+except OSError:
+    ADDON_HASH = None
 
 # Commands the bridge runs itself: their state must survive reload_handler
 BRIDGE_COMMANDS = frozenset(
@@ -96,7 +105,7 @@ class EventBridge:
         self._tx = None
         self._history = None
         if use_transactions:
-            self._history = History(app, COMMAND_ID)
+            self._history = History(app, COMMAND_ID, self._invalidate_cache)
             self._tx = TransactionRunner(
                 app.userInterface,
                 self._execute,
@@ -132,13 +141,16 @@ class EventBridge:
         # Fast-path: ping never touches Fusion API — answer immediately
         if cmd_type == "ping":
             log.debug("ping (fast path)")
-            return {"status": "success", "result": {"ok": True, "status": "pong"}}
+            return {
+                "status": "success",
+                "result": {"ok": True, "status": "pong", "addon_hash": ADDON_HASH},
+            }
 
         params = command.get("params", {})
         if cmd_type == "start_job":
             return self._start_job(params)
         if cmd_type == "get_job":
-            return self._get_job(params.get("job_id"))
+            return self._get_job(params.get("job_id"), params.get("wait_s", 0))
         try:
             command = self._resolve_dry_run(command)
         except ValueError as exc:
@@ -233,12 +245,14 @@ class EventBridge:
             self._prune_jobs()
         return job_id
 
-    def _get_job(self, job_id) -> dict:
+    def _get_job(self, job_id, wait_s: float = 0) -> dict:
         with self._jobs_lock:
             job = self._jobs.get(job_id)
         if job is None:
             return _failure("INVALID_INPUT", f"Unknown job '{job_id}'")
         item = job["item"]
+        if wait_s:
+            item.done.wait(min(float(wait_s), MAX_JOB_WAIT_S))
         info = {
             "job_id": job_id,
             "tool": job["tool"],
@@ -322,6 +336,12 @@ class EventBridge:
     def _execute(self, command: dict) -> dict:
         return self._handler.execute_command(command)
 
+    def _invalidate_cache(self):
+        """The model may have changed outside MCP: drop cached graphs."""
+        invalidate = getattr(self._handler, "invalidate_cache", None)
+        if invalidate is not None:
+            invalidate()
+
     def _probe(self):
         """Timeline names and problems, or None when they cannot be read."""
         try:
@@ -398,8 +418,9 @@ class EventBridge:
         from . import hole_geometry as hole_mod
         from . import model_graph as graph_mod
         from . import parameter_units as units_mod
+        from . import sketch_info as sketch_mod
 
-        for mod in (hints_mod, hole_mod, units_mod, graph_mod, ch_mod):
+        for mod in (hints_mod, hole_mod, units_mod, graph_mod, sketch_mod, ch_mod):
             importlib.reload(mod)
         self._handler = ch_mod.CommandHandler()
         # Reset lazy dispatch table so it picks up new commands

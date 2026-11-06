@@ -94,6 +94,8 @@ def test_expected_tools_present():
         "check_references",
         "set_design_note",
         "get_design_notes",
+        "get_sketch_info",
+        "advance_marker",
         "reload_handler",
         # history
         "create_checkpoint",

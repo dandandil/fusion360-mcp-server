@@ -12,6 +12,10 @@ claude mcp add fusion360 --scope user -- ssh -T -o BatchMode=yes -o ExitOnForwar
 
 Add-in копируется в `%APPDATA%\Autodesk\Autodesk Fusion 360\API\AddIns\Fusion360MCP` (`scp -r PC-108-7:cad_experiments/fusion360-mcp-server/addon ...`). После правок `command_handler.py`/`model_graph.py` достаточно скопировать и вызвать `reload_handler`; правки моста, транзакций и журнала требуют перезапуска add-in.
 
+При подключении сервер сравнивает хеш add-in (`ping`) с `addon/` в репозитории; если они разные, каждый ответ начинается с предупреждения — скопировать add-in заново и перезапустить его.
+
+Если запуск падает с `Connection closed`, порт на PC-108-7 может держать повисший туннель прошлой сессии: `ssh PC-108-7 fuser -k 9876/tcp`, затем перезапустить Claude Code.
+
 Флаг `FUSION_MCP_TRANSACTIONS=0` (переменная окружения Fusion) отключает транзакции, а с ними журнал, точки отката и `dry_run`.
 
 ## Новые инструменты
@@ -19,9 +23,9 @@ Add-in копируется в `%APPDATA%\Autodesk\Autodesk Fusion 360\API\AddIn
 | Группа | Инструменты | Что дают |
 |---|---|---|
 | Транзакции | (все правящие инструменты) | один вызов = один шаг undo `MCP: <инструмент>`; упавший вызов откатывается (`rolled_back: true`); `timeline_changes` — удалённые каскадом и сломанные элементы; `user_actions` — что пользователь сделал в Fusion между вызовами |
-| Точки отката | `create_checkpoint`, `list_checkpoints`, `rollback_to_checkpoint` | откат серии вызовов; отказ, если модель правили не через MCP |
-| Таймлайн | `get_timeline` (фильтры, пагинация), `get_feature_info`, `get_dependents`, `features_near` | структура модели, входы фич, кто от чего зависит, что находится в области |
-| Пересчёт | `set_timeline_marker`, `compute_all`, `start_job`, `get_job` | пересчёт по шагам; долгие вызовы в фоне; вызов дольше 30 с сам становится задачей (`state: running`, `job_id`) |
+| Точки отката | `create_checkpoint`, `list_checkpoints`, `rollback_to_checkpoint` | откат серии вызовов с возвратом маркера; отказ, если модель правили не через MCP |
+| Таймлайн | `get_timeline` (фильтры, пагинация), `get_feature_info` (`roll`), `get_sketch_info`, `get_dependents` (кэш), `features_near` | структура модели, входы фич, эскиз целиком (связи, размеры, профили), кто от чего зависит, что находится в области |
+| Пересчёт | `set_timeline_marker`, `advance_marker`, `compute_all`, `start_job`, `get_job` (`wait_s`) | пересчёт по шагам; долгие вызовы в фоне; вызов дольше 30 с сам становится задачей (`state: running`, `job_id`) |
 | Безопасные правки | `dry_run`, `snapshot_references`, `check_references`, `recreate_feature` | пробная правка с откатом; потерянные грани/рёбра и кандидаты; пересоздание OffsetFaces/Sweep/Extrude/Remove на месте |
 | Замысел | `set_design_note`, `get_design_notes` | заметки (сборка, печать, крепёж) в атрибутах модели |
 | Обзор | `render_view` (`focus`, `center`/`radius`, `show_only`), `get_scene_info` (`limit`) | кадр на узел или эскиз с размерами; без дампа всей модели |
@@ -34,6 +38,8 @@ Add-in копируется в `%APPDATA%\Autodesk\Autodesk Fusion 360\API\AddIn
 - `addon/server/transaction.py` — запуск команды внутри Fusion Command, откат, пробный прогон.
 - `addon/server/history.py` — журнал шагов и точки отката.
 - `addon/server/model_graph.py` — таймлайн, входы фич, граф зависимостей, проверка ссылок (без `adsk`, тестируется на фейках).
+- `addon/server/sketch_info.py` — описание эскиза для `get_sketch_info` (без `adsk`).
+- `addon/server/version.py`, `src/fusion360_mcp/addon_check.py` — хеш add-in и проверка версии.
 - `src/fusion360_mcp/guide.py` — правила для агента.
 - `src/fusion360_mcp/call_log.py` — журнал вызовов на стороне сервера: `~/.local/state/fusion360-mcp/calls-ДАТА.jsonl` и `server.log` (`FUSION_MCP_LOG_DIR`, `off` — выключить). Лог add-in — на Windows, `%USERPROFILE%\fusion360mcp.log`.
 
@@ -53,6 +59,6 @@ Add-in копируется в `%APPDATA%\Autodesk\Autodesk Fusion 360\API\AddIn
 3. **Sweep через текстовые/UI-команды** как запасной путь к `recreate_feature`.
 4. **Ссылки на рёбра после `rollTo`:** общий механизм перечитывания, сейчас только внутри `recreate_feature`.
 5. **Параллельная работа: второй экземпляр Fusion.** Запуск из `.bat` с `FUSION_MCP_PORT=9877`, туннель `-R 9877:localhost:9877`, сервер с тем же портом. Проверить: доходит ли переменная до Fusion через лаунчер; что происходит с add-in, если порт занят (не мешать второму экземпляру); стабильность на больших моделях. Журнал истории разделить по документам. Docker и параметр `document` отклонены (обоснование в `TIMELINE.md`).
-6. **Чтение ссылок без отката маркера** (репорт, п. 5): рёбра фасок, тела-участники, плоскость эскиза на грани сейчас читаются только после `rollTo`.
+6. **Сравнение с сохранённой версией** (живой тест, рек. 11): отличать новые поломки от старых, скрытых кэшем (`Sketch41`).
 7. **Измерения** (репорт, п. 8): минимальное расстояние между телами/гранями, сечение плоскостью, толщина стенок.
 8. **Энкодер** (раздел 5 заметок) — отдельная работа.

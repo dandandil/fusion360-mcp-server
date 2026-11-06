@@ -142,7 +142,10 @@ class _Products:
 class _App:
     def __init__(self):
         self.userInterface = _UI(self)
-        self.timeline = types.SimpleNamespace(count=0)
+        self.timeline = types.SimpleNamespace(count=0, markerPosition=0)
+        self.timeline.moveToEnd = lambda: setattr(
+            self.timeline, "markerPosition", self.timeline.count
+        )
         self.problems = {}
         self.names = []
         self.activeDocument = types.SimpleNamespace(
@@ -187,8 +190,11 @@ class _Handler:
         if params.get("fail"):
             self._app.timeline.count += 1  # partial edit before the failure
             return {"status": "success", "result": {"ok": False, "error_kind": "X"}}
-        if command["type"] not in ("get_scene_info", "set_timeline_marker"):
+        if command["type"] == "set_timeline_marker":
+            self._app.timeline.markerPosition = params["position"]
+        elif command["type"] != "get_scene_info":
             self._app.timeline.count += 1
+            self._app.timeline.markerPosition = self._app.timeline.count
         return {"status": "success", "result": {"ok": True}}
 
 
@@ -521,11 +527,42 @@ def test_unknown_job(setup):
     assert response["result"]["error_kind"] == "INVALID_INPUT"
 
 
-def test_marker_move_blocks_rollback(setup):
-    _call(setup, "create_checkpoint", name="cp")
+def test_marker_move_does_not_block_rollback(setup):
     _call(setup, "extrude")
+    _call(setup, "create_checkpoint", name="cp")  # marker at 1 (end)
     _call(setup, "set_timeline_marker", position=0)
-    assert setup.cmd_def.undo_names == ["MCP: extrude"]  # marker: no transaction
+    _call(setup, "extrude")
+    _call(setup, "set_timeline_marker", position=1)
+    assert setup.cmd_def.undo_names == ["MCP: extrude", "MCP: extrude"]
     result = _call(setup, "rollback_to_checkpoint", name="cp")
-    assert result["error_kind"] == "HISTORY_CONFLICT"
-    assert "untracked:set_timeline_marker" in result["error_message"]
+    assert result["undone"] == ["mcp:extrude"]  # marker moves are not undone
+    assert result["marker_position"] == 1
+    assert result["timeline_matches_checkpoint"] is True
+
+
+def test_get_job_waits(setup):
+    started = setup.bridge.submit(
+        {"type": "start_job", "params": {"tool": "extrude", "params": {}}}
+    )["result"]
+    t, box = threading.Thread(), {}
+    t = threading.Thread(
+        target=lambda: box.update(
+            r=setup.bridge.submit(
+                {
+                    "type": "get_job",
+                    "params": {"job_id": started["job_id"], "wait_s": 5},
+                }
+            )
+        )
+    )
+    t.start()
+    setup.bridge.drain_queue()
+    setup.cmd_def.run_scheduled()
+    t.join(2)
+    assert box["r"]["result"]["state"] == "done"
+
+
+def test_ping_reports_addon_hash(setup, addon):
+    result = setup.bridge.submit({"type": "ping"})["result"]
+    assert result["addon_hash"] == addon.bridge.ADDON_HASH
+    assert len(result["addon_hash"]) == 12

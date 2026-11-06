@@ -246,9 +246,19 @@ def _filleted_model():
     return timeline, body, edge_set
 
 
+def _snapshot(timeline):
+    snapshot, _ = graph.reference_snapshot(timeline, graph.face_creators(timeline))
+    return snapshot
+
+
+def _check(timeline, snapshot, body):
+    creators = graph.face_creators(timeline)
+    return graph.check_references(timeline, snapshot, lambda n: body, creators)
+
+
 def test_refs_carry_geometry():
     timeline, _, _ = _filleted_model()
-    snapshot = graph.reference_snapshot(timeline)
+    snapshot = _snapshot(timeline)
     ref = snapshot["Fillet1"]["edgeSets"][0]
     assert ref["at"] == [1, 0, 1]
     assert ref["size"] == 2.0
@@ -257,18 +267,18 @@ def test_refs_carry_geometry():
 
 def test_unchanged_model_has_no_lost_references():
     timeline, body, _ = _filleted_model()
-    snapshot = graph.reference_snapshot(timeline)
-    assert graph.check_references(timeline, snapshot, lambda n: body) == []
+    snapshot = _snapshot(timeline)
+    assert _check(timeline, snapshot, body) == []
 
 
 def test_lost_edge_reports_nearest_candidates():
     timeline, body, edge_set = _filleted_model()
-    snapshot = graph.reference_snapshot(timeline)
+    snapshot = _snapshot(timeline)
     edge_set.edges = Collection([])  # recompute dropped the edge
     timeline.item(1)._health = 2
     timeline.item(1)._message = "edge lost"
 
-    report = graph.check_references(timeline, snapshot, lambda n: body)
+    report = _check(timeline, snapshot, body)
     assert len(report) == 1
     item = report[0]
     assert (item["name"], item["health"], item["message"]) == (
@@ -284,9 +294,9 @@ def test_lost_edge_reports_nearest_candidates():
 
 def test_failing_item_without_snapshot_refs_is_reported():
     timeline, body, _ = _filleted_model()
-    snapshot = graph.reference_snapshot(timeline)
+    snapshot = _snapshot(timeline)
     timeline.item(1)._health = 2
-    report = graph.check_references(timeline, snapshot, lambda n: body)
+    report = _check(timeline, snapshot, body)
     assert report == [{"name": "Fillet1", "health": "error", "lost": {}}]
 
 
@@ -321,3 +331,20 @@ def test_list_timeline_filters_by_name_and_type(timeline):
     assert [i["name"] for i in by_name] == ["Extrude1", "Extrude2"]
     by_type = graph.list_timeline(timeline, types=["Sketch"])["items"]
     assert [i["name"] for i in by_type] == ["Sketch1", "Sketch2"]
+
+
+def test_graph_refs_skip_geometry(timeline):
+    nodes = graph.build_graph(timeline)
+    assert nodes["Fillet1"]["refs"] == {"Extrude1"}
+    fillet = graph.find_timeline_object(timeline, "Fillet1").entity
+    inputs, _ = graph.entity_inputs(fillet, graph.face_creators(timeline), False)
+    assert "at" not in inputs["edgeSets"][0]
+
+
+def test_snapshot_starts_at_index_and_lists_unreadable(timeline):
+    snapshot, unreadable = graph.reference_snapshot(
+        timeline, graph.face_creators(timeline), start=3
+    )
+    assert set(snapshot) <= {"Fillet1", "Extrude2"}
+    assert "Extrude1" not in snapshot
+    assert unreadable == []  # Broken1 is an error item: skipped, not unreadable

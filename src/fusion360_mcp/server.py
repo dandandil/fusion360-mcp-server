@@ -16,6 +16,7 @@ import click
 import mcp.types as types
 from mcp.server.lowlevel import Server
 
+from .addon_check import AddonCheck
 from .call_log import CallLog, log_dir
 from .connection import (
     _DEFAULT_HOST,
@@ -33,6 +34,15 @@ logging.basicConfig(
 )
 log = logging.getLogger("fusion360_mcp.server")
 
+# get_job may block while Fusion holds the main thread in one long API call
+# (recompute): wait for it rather than time out and retry.
+_GET_JOB_TIMEOUT = 600.0
+STALE_TUNNEL_HINT = (
+    "If the add-in is running, a stale ssh tunnel from an earlier session may "
+    "hold the port on the server host: there, `fuser -k <port>/tcp` closes it; "
+    "then restart the MCP server."
+)
+
 
 def _send(
     mode: str,
@@ -46,7 +56,21 @@ def _send(
     if mode == "mock":
         return mock_command(command_type, params)
     conn = get_connection(host=host, port=port)
+    if command_type == "get_job":
+        timeout = _GET_JOB_TIMEOUT + float((params or {}).get("wait_s", 0))
+        return conn.send_command(command_type, params, timeout=timeout)
     return conn.send_command(command_type, params)
+
+
+def _with_warning(result, warning: str | None):
+    """Prepend the add-in version warning to a tool result."""
+    if not warning:
+        return result
+    block = types.TextContent(type="text", text=warning)
+    if isinstance(result, types.CallToolResult):
+        result.content.insert(0, block)
+        return result
+    return [block, *result]
 
 
 def _error_outcome(exc: Exception, kind: str) -> dict:
@@ -193,6 +217,7 @@ def main(mode: str, host: str, port: int) -> int:
 
     app = Server("fusion360-mcp-server", instructions=INSTRUCTIONS)
     calls = CallLog(log_dir() if mode != "mock" else None)
+    addon = AddonCheck() if mode != "mock" else None
 
     # ── tools ────────────────────────────────────────────────────────
 
@@ -210,22 +235,27 @@ def main(mode: str, host: str, port: int) -> int:
             raise ValueError(f"Unknown tool: {name}")
 
         started = time.monotonic()
+        warning = None
+        if addon is not None:
+            warning = addon.check(lambda: _send(mode, "ping", host=host, port=port))
         try:
             result = _send(mode, name, arguments, host=host, port=port)
         except FusionError as exc:
             # Structured failure from the add-in (or a non-retried
             # mutation timeout) — the connection itself is healthy.
             calls.record(name, arguments, started, _error_outcome(exc, exc.error_kind))
-            return _fusion_error_result(name, exc)
+            return _with_warning(_fusion_error_result(name, exc), warning)
         except Exception as exc:
             calls.record(name, arguments, started, _error_outcome(exc, "CONNECTION"))
             reset_connection()
+            if addon is not None:
+                addon.reset()
             content = [
                 types.TextContent(
                     type="text",
                     text=f"Error ({name}): {exc}\n\n"
                     "Make sure Fusion 360 is running and the "
-                    "Fusion360MCP add-in is started.",
+                    f"Fusion360MCP add-in is started. {STALE_TUNNEL_HINT}",
                 )
             ]
             return types.CallToolResult(
@@ -234,7 +264,7 @@ def main(mode: str, host: str, port: int) -> int:
             )
 
         calls.record(name, arguments, started, result)
-        return _format_result(name, result)
+        return _with_warning(_format_result(name, result), warning)
 
     # ── resources ────────────────────────────────────────────────────
 

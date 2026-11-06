@@ -7,7 +7,9 @@ transactions are recorded by the bridge, every other completed command
 recorded as foreign.  Undo pops the newest entry; redo cannot be mirrored
 reliably and is recorded as foreign too.  MCP edits made outside a
 transaction (marker moves) are recorded as untracked: their undo behaviour
-is unknown, so they block rollback like foreign entries.
+is unknown, so they block rollback like foreign entries.  Marker moves are
+journaled as such and do not block: a checkpoint stores the marker position
+and rollback restores it after undoing the MCP steps.
 
 Rollback to a checkpoint undoes the MCP steps after it, and refuses when
 foreign entries are in the way or the timeline count shows an edit the
@@ -27,12 +29,16 @@ UNDO_COMMAND_ID = "UndoCommand"
 # Commands that complete without adding an undo step
 IGNORED_COMMAND_IDS = frozenset({"SelectCommand"})
 
-# MCP commands that may edit the design outside a transaction
-UNTRACKED_EDIT_COMMANDS = frozenset({"set_timeline_marker"})
+# MCP commands that change the design outside a transaction
+UNTRACKED_EDIT_COMMANDS = frozenset({"set_timeline_marker", "advance_marker"})
+MARKER_COMMANDS = frozenset({"set_timeline_marker", "advance_marker"})
 
 MCP = "mcp"
 FOREIGN = "foreign"
 UNTRACKED = "untracked"
+MARKER = "marker"
+# Entry kinds rollback steps over without undoing them
+NON_BLOCKING = (MCP, MARKER)
 
 
 class HistoryError(Exception):
@@ -52,9 +58,11 @@ class _TerminatedHandler(adsk.core.ApplicationCommandEventHandler):
 
 
 class History:
-    def __init__(self, app, own_command_id: str):
+    def __init__(self, app, own_command_id: str, on_foreign=None):
         self._app = app
         self._own_command_id = own_command_id
+        # Called on the main thread when the user changes the model
+        self._on_foreign = on_foreign
         self._entries = []
         self._checkpoints = {}
         # Undo commands issued by rollback; their terminations must not pop
@@ -79,7 +87,7 @@ class History:
         self._append(MCP, tool)
 
     def record_untracked(self, tool: str):
-        self._append(UNTRACKED, tool)
+        self._append(MARKER if tool in MARKER_COMMANDS else UNTRACKED, tool)
 
     def on_command_terminated(self, command_id: str, reason):
         completed = adsk.core.CommandTerminationReason.CompletedTerminationReason
@@ -102,6 +110,8 @@ class History:
     def _note_user_action(self, command_id: str):
         with self._user_actions_lock:
             self._user_actions.append(command_id)
+        if self._on_foreign is not None:
+            self._on_foreign()
 
     def take_user_actions(self) -> list:
         with self._user_actions_lock:
@@ -126,10 +136,12 @@ class History:
     # ------------------------------------------------------------------
 
     def create_checkpoint(self, name: str) -> dict:
+        timeline = self._timeline()
         self._checkpoints[name] = {
             "position": len(self._entries),
             "document": self._document_name(),
             "timeline_count": self._timeline_count(),
+            "marker_position": timeline.markerPosition if timeline else None,
         }
         return {"checkpoint": name, **self._checkpoints[name]}
 
@@ -164,7 +176,9 @@ class History:
                 ["activate that document first"],
             )
         steps = self._entries[cp["position"] :]
-        blocking = [f"{e['kind']}:{e['name']}" for e in steps if e["kind"] != MCP]
+        blocking = [
+            f"{e['kind']}:{e['name']}" for e in steps if e["kind"] not in NON_BLOCKING
+        ]
         if blocking and not force:
             raise HistoryError(
                 f"Steps not made by MCP transactions since '{name}': {blocking}",
@@ -185,19 +199,33 @@ class History:
             )
 
         undo = self._app.userInterface.commandDefinitions.itemById(UNDO_COMMAND_ID)
-        for _ in steps:
+        undone = [e for e in steps if e["kind"] != MARKER]
+        for _ in undone:
             self._expected_undos += 1
             undo.execute()
             adsk.doEvents()
         self._truncate(cp["position"])
+        marker = self._restore_marker(cp.get("marker_position"))
 
         after = self._timeline_count()
         return {
             "checkpoint": name,
-            "undone": [f"{e['kind']}:{e['name']}" for e in steps],
+            "undone": [f"{e['kind']}:{e['name']}" for e in undone],
             "timeline_count": after,
+            "marker_position": marker,
             "timeline_matches_checkpoint": after == cp["timeline_count"],
         }
+
+    def _restore_marker(self, position):
+        timeline = self._timeline()
+        if timeline is None or position is None:
+            return None
+        if timeline.markerPosition != position:
+            if position >= timeline.count:
+                timeline.moveToEnd()
+            else:
+                timeline.markerPosition = position
+        return timeline.markerPosition
 
     # ------------------------------------------------------------------
     # Helpers
@@ -207,8 +235,8 @@ class History:
         doc = self._app.activeDocument
         return doc.name if doc is not None else None
 
-    def _timeline_count(self):
-        """Timeline item count of a parametric design, else None."""
+    def _timeline(self):
+        """Timeline of a parametric design, else None."""
         doc = self._app.activeDocument
         if doc is None:
             return None
@@ -220,4 +248,8 @@ class History:
             return None
         if design.designType != adsk.fusion.DesignTypes.ParametricDesignType:
             return None
-        return design.timeline.count
+        return design.timeline
+
+    def _timeline_count(self):
+        timeline = self._timeline()
+        return timeline.count if timeline is not None else None

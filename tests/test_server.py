@@ -115,6 +115,7 @@ class TestToolAnnotations:
             "list_checkpoints",
             "get_job",
             "get_design_notes",
+            "get_sketch_info",
             "snapshot_references",
             "check_references",
         }
@@ -218,6 +219,7 @@ class TestGuide:
             "removed_items",
             "new_problems",
             "user_actions",
+            "wait_s",
         }
         assert mentioned - fields <= names
         assert set(EDIT_MODEL_STEPS) <= names

@@ -25,6 +25,7 @@ from . import hints as _hints
 from . import hole_geometry as _hole_geom
 from . import model_graph as _graph
 from . import parameter_units as _param_units
+from . import sketch_info as _sketch_info
 
 log = get_logger("handler")
 
@@ -35,6 +36,37 @@ class CommandHandler:
     def __init__(self):
         self.app = adsk.core.Application.get()
         self.ui = self.app.userInterface
+        # face creators / dependency graph, valid until the model changes
+        self._cache = {}
+
+    # Commands that never change the model: they keep the graph cache
+    _CACHE_SAFE_COMMANDS = frozenset(
+        {
+            "ping",
+            "get_scene_info",
+            "get_object_info",
+            "get_bounding_box",
+            "list_components",
+            "get_timeline",
+            "get_feature_info",
+            "get_dependents",
+            "features_near",
+            "get_sketch_info",
+            "get_design_notes",
+            "snapshot_references",
+            "check_references",
+            "get_parameters",
+            "get_physical_properties",
+            "measure_distance",
+            "measure_angle",
+            "check_interference",
+            "get_design_type",
+            "render_view",
+        }
+    )
+
+    def invalidate_cache(self):
+        self._cache = {}
 
     # ------------------------------------------------------------------
     # Dispatch
@@ -112,6 +144,7 @@ class CommandHandler:
             "set_color",
             # timeline
             "set_timeline_marker",
+            "advance_marker",
             "recreate_feature",
         }
     )
@@ -131,7 +164,9 @@ class CommandHandler:
                 "get_dependents": self.get_dependents,
                 "features_near": self.features_near,
                 "set_timeline_marker": self.set_timeline_marker,
+                "advance_marker": self.advance_marker,
                 "compute_all": self.compute_all,
+                "get_sketch_info": self.get_sketch_info,
                 "recreate_feature": self.recreate_feature,
                 "snapshot_references": self.snapshot_references,
                 "check_references": self.check_references,
@@ -257,6 +292,8 @@ class CommandHandler:
                 "message": f"Unknown command: {cmd_type}",
             }
 
+        if cmd_type not in self._CACHE_SAFE_COMMANDS:
+            self.invalidate_cache()
         is_mutation = cmd_type in self._MUTATION_COMMANDS
         snap_before = self._snapshot() if is_mutation else None
 
@@ -325,11 +362,12 @@ class CommandHandler:
         return root.sketches.item(root.sketches.count - 1)
 
     def _sketch_by_name(self, name: str):
-        root = self._root()
-        for i in range(root.sketches.count):
-            s = root.sketches.item(i)
-            if s.name == name:
-                return s
+        """Sketch by name in any component (root first)."""
+        components = [self._root()] + list(self._design().allComponents)
+        for component in components:
+            sketch = component.sketches.itemByName(name)
+            if sketch is not None:
+                return sketch
         raise RuntimeError(f"Sketch '{name}' not found")
 
     def _body_by_name(self, name: str):
@@ -580,15 +618,32 @@ class CommandHandler:
         found = _graph.features_near(self._timeline(), point, radius)
         return {"point": point, "radius": radius, "items": found, "count": len(found)}
 
-    def get_feature_info(self, name: str):
+    def _creators(self) -> dict:
+        """entityToken -> creating feature, cached until the model changes."""
+        timeline = self._timeline()
+        key = (timeline.count, timeline.markerPosition)
+        if self._cache.get("key") != key:
+            self._cache = {"key": key, "creators": _graph.face_creators(timeline)}
+        return self._cache["creators"]
+
+    def get_feature_info(self, name: str, roll: bool = False):
+        """Inputs, bodies and parameters of a timeline item.
+
+        *roll* re-reads inputs the API refuses at the current marker
+        (``unreadable``) with the marker rolled to just before the item,
+        then puts the marker back — which recomputes everything after it.
+        """
         timeline = self._timeline()
         tl_obj = _graph.find_timeline_object(timeline, name)
         info = _graph.timeline_entry(tl_obj)
         entity = None if tl_obj.isGroup else tl_obj.entity
         if entity is None:
             return info
-        creators = _graph.face_creators(timeline)
-        info["inputs"], unreadable = _graph.entity_inputs(entity, creators)
+        info["inputs"], unreadable = _graph.entity_inputs(entity, self._creators())
+        if unreadable and roll:
+            rolled, unreadable = self._inputs_rolled_back(timeline, tl_obj, unreadable)
+            info["inputs"].update(rolled)
+            info["read_with_marker_rolled_back"] = sorted(rolled)
         info["bodies"], bodies_error = _graph.output_bodies(entity)
         if bodies_error:
             unreadable["bodies"] = bodies_error
@@ -597,12 +652,47 @@ class CommandHandler:
         info["parameters"] = self._parameters_created_by(entity)
         return info
 
+    def _inputs_rolled_back(self, timeline, tl_obj, unreadable: dict):
+        marker_at_end = timeline.markerPosition == timeline.count
+        marker = timeline.markerPosition
+        name = tl_obj.name
+        if not tl_obj.rollTo(True):
+            raise RuntimeError(f"Could not roll the timeline to before {name}")
+        try:
+            entity = _graph.find_timeline_object(timeline, name).entity
+            creators = _graph.face_creators(timeline)
+            inputs, still = _graph.entity_inputs(entity, creators)
+        finally:
+            if marker_at_end:
+                timeline.moveToEnd()
+            else:
+                timeline.markerPosition = marker
+            self.invalidate_cache()
+        rolled = {k: v for k, v in inputs.items() if k in unreadable}
+        return rolled, {k: v for k, v in still.items() if k in unreadable}
+
     def get_dependents(
         self, name: str, transitive: bool = False, include_bodies: bool = False
     ):
-        graph = _graph.build_graph(self._timeline())
+        started = time.monotonic()
+        creators = self._creators()
+        graph = self._cache.get("graph")
+        cached = graph is not None
+        if not cached:
+            graph = _graph.build_graph(self._timeline(), creators)
+            self._cache["graph"] = graph
         found = _graph.dependents(graph, name, transitive, include_bodies)
-        return {"name": name, "dependents": found, "count": len(found)}
+        return {
+            "name": name,
+            "dependents": found,
+            "count": len(found),
+            "graph_cached": cached,
+            "elapsed_s": round(time.monotonic() - started, 2),
+        }
+
+    def get_sketch_info(self, name: str, limit: int = 200):
+        accuracy = adsk.fusion.CalculationAccuracy.LowCalculationAccuracy
+        return _sketch_info.describe_sketch(self._sketch_by_name(name), accuracy, limit)
 
     def _parameters_created_by(self, entity):
         params = []
@@ -639,8 +729,20 @@ class CommandHandler:
         if design.designType != adsk.fusion.DesignTypes.ParametricDesignType:
             return {"names": [], "problems": {}}
         timeline = design.timeline
-        names = [timeline.item(i).name for i in range(timeline.count)]
-        return {"names": names, "problems": self.timeline_problems()}
+        names, problems = [], {}
+        for i in range(timeline.count):
+            tl_obj = timeline.item(i)
+            names.append(tl_obj.name)
+            try:
+                health = _graph.HEALTH_STATES.get(tl_obj.healthState, "unknown")
+            except Exception:  # unreadable for some types; not a problem
+                continue
+            if health in ("warning", "error"):
+                problems[tl_obj.name] = {
+                    "health": health,
+                    "message": tl_obj.errorOrWarningMessage,
+                }
+        return {"names": names, "problems": problems}
 
     def set_timeline_marker(
         self,
@@ -667,6 +769,51 @@ class CommandHandler:
             "marker_position": timeline.markerPosition,
             "count": timeline.count,
             "problems": problems,
+        }
+
+    def advance_marker(self, to: str = None, position: int = None, stop_on="error"):
+        """Move the marker forward one item at a time up to *to* / *position*
+        (default: the end), stopping at the first item that fails.
+
+        One step recomputes only the item rolled forward, so a full pass
+        costs about one recompute, and the failing item is known exactly.
+        *stop_on*: "error", "warning" or "never".
+        """
+        started = time.monotonic()
+        timeline = self._timeline()
+        if to is not None:
+            target = _graph.find_timeline_object(timeline, to).index + 1
+        else:
+            target = timeline.count if position is None else int(position)
+        target = min(target, timeline.count)
+        stop_states = {"error": ("error",), "warning": ("warning", "error")}.get(
+            stop_on, ()
+        )
+        start = timeline.markerPosition
+        warnings, stopped = [], None
+        while timeline.markerPosition < target:
+            position = timeline.markerPosition
+            tl_obj = timeline.item(position)
+            timeline.markerPosition = position + 1
+            if timeline.markerPosition != position + 1:
+                raise RuntimeError(f"Fusion refused to move the marker past {position}")
+            entry = _graph.timeline_entry(tl_obj)
+            if entry["health"] in ("warning", "error"):
+                problem = {
+                    k: entry[k] for k in ("index", "name", "health") if k in entry
+                }
+                problem["message"] = entry.get("message", "")
+                if entry["health"] in stop_states:
+                    stopped = problem
+                    break
+                warnings.append(problem)
+        return {
+            "start": start,
+            "marker_position": timeline.markerPosition,
+            "count": timeline.count,
+            "stopped_at": stopped,
+            "warnings": warnings,
+            "elapsed_s": round(time.monotonic() - started, 1),
         }
 
     def compute_all(self):
@@ -788,11 +935,20 @@ class CommandHandler:
                 )
             )
         if kind == "RemoveFeature":
-            return features.removeFeatures.add(self._body_by_name(body))
+            return features.removeFeatures.add(self._body_in(component, body))
         profile = self._profiles(profile_sketch, profile_index)
         if kind == "SweepFeature":
             return self._create_sweep(component, profile, settings)
         return self._create_extrude(component, profile, settings)
+
+    def _body_in(self, component, name: str):
+        """Body by name, native to *component* (features of a sub-component
+        need its own bodies, not occurrence proxies)."""
+        body = self._body_by_name(name)
+        native = getattr(body, "nativeObject", None)
+        if native is not None and component != self._root():
+            return native
+        return body
 
     def _profiles(self, sketch_name: str, index):
         """One profile, or an ObjectCollection when *index* is a list."""
@@ -849,7 +1005,7 @@ class CommandHandler:
             )
         if settings["participant_bodies"]:
             inp.participantBodies = [
-                self._body_by_name(n) for n in settings["participant_bodies"]
+                self._body_in(component, n) for n in settings["participant_bodies"]
             ]
         return extrudes.add(inp)
 
@@ -901,17 +1057,42 @@ class CommandHandler:
             faces.append(found.item(0))
         return faces
 
-    def snapshot_references(self):
-        snapshot = _graph.reference_snapshot(self._timeline())
-        self._reference_snapshot = snapshot
+    def snapshot_references(self, after: str = None):
+        """Face/edge inputs of the items after *after* (default: all)."""
+        timeline = self._timeline()
+        start = 0
+        if after is not None:
+            start = _graph.find_timeline_object(timeline, after).index + 1
+        snapshot, unreadable = _graph.reference_snapshot(
+            timeline, self._creators(), start
+        )
+        self._reference_snapshot = {
+            "refs": snapshot,
+            "marker_position": timeline.markerPosition,
+        }
         refs = sum(len(r) for attrs in snapshot.values() for r in attrs.values())
-        return {"items": len(snapshot), "references": refs}
+        return {
+            "items": len(snapshot),
+            "references": refs,
+            "marker_position": timeline.markerPosition,
+            # Not covered: their inputs need the marker rolled back
+            "unreadable_items": unreadable,
+        }
 
     def check_references(self):
         snapshot = getattr(self, "_reference_snapshot", None)
         if snapshot is None:
             raise RuntimeError("Call snapshot_references before the edit")
-        report = _graph.check_references(self._timeline(), snapshot, self._body_or_none)
+        timeline = self._timeline()
+        if timeline.markerPosition != snapshot["marker_position"]:
+            raise RuntimeError(
+                f"Snapshot was taken at marker {snapshot['marker_position']}, "
+                f"the marker is at {timeline.markerPosition}: move it back "
+                "(set_timeline_marker / advance_marker) or take a new snapshot"
+            )
+        report = _graph.check_references(
+            timeline, snapshot["refs"], self._body_or_none, self._creators()
+        )
         return {"affected": report, "count": len(report)}
 
     def _body_or_none(self, name: str):
@@ -4063,10 +4244,13 @@ class CommandHandler:
                     # physicalProperties.mass is in kg.  Sum occurrence
                     # bodies explicitly so mass_g stays consistent with
                     # body_count (which includes occurrence bodies).
-                    mass_kg = float(root.physicalProperties.mass)
+                    # Low accuracy: this runs twice per edit, and the default
+                    # accuracy took seconds on a 300-feature model
+                    low = adsk.fusion.CalculationAccuracy.LowCalculationAccuracy
+                    mass_kg = float(root.getPhysicalProperties(low).mass)
                     for occ in root.allOccurrences:
                         try:
-                            mass_kg += float(occ.physicalProperties.mass)
+                            mass_kg += float(occ.getPhysicalProperties(low).mass)
                         except Exception:
                             pass
                     mass_g = mass_kg * 1000.0

@@ -238,16 +238,22 @@ def face_creators(timeline) -> dict:
     return creators
 
 
-def describe_ref(obj, creators: dict) -> list[dict]:
-    """Reduce an input object to graph nodes."""
+def describe_ref(obj, creators: dict, geometry: bool = True) -> list[dict]:
+    """Reduce an input object to graph nodes.
+
+    *geometry* adds face/edge location and size (slow on big models; the
+    dependency graph does not need it).
+    """
     elements = _items(obj)
     if elements is not None:
-        return [ref for e in elements for ref in describe_ref(e, creators)]
+        return [ref for e in elements for ref in describe_ref(e, creators, geometry)]
     kind = short_type(obj)
     if kind in _NESTED_ATTR:
-        return describe_ref(getattr(obj, _NESTED_ATTR[kind]), creators)
+        return describe_ref(getattr(obj, _NESTED_ATTR[kind]), creators, geometry)
     if kind.endswith("EdgeSet"):
-        return describe_ref(obj.edges, creators) if _has(obj, "edges") else []
+        if not _has(obj, "edges"):
+            return []
+        return describe_ref(obj.edges, creators, geometry)
     if kind == "Profile":
         return [{"kind": "sketch", "name": obj.parentSketch.name}]
     if kind == "Sketch":
@@ -258,10 +264,10 @@ def describe_ref(obj, creators: dict) -> list[dict]:
         return [{"kind": "body", "name": obj.name}]
     if kind == "BRepFace":
         ref = _topology_ref("face", obj.body.name, [obj], creators)
-        return [_with_geometry(ref, obj)]
+        return [_with_geometry(ref, obj) if geometry else ref]
     if kind == "BRepEdge":
         ref = _topology_ref("edge", obj.body.name, _items(obj.faces), creators)
-        return [_with_geometry(ref, obj)]
+        return [_with_geometry(ref, obj) if geometry else ref]
     if kind == "BRepVertex":
         return [{"kind": "vertex", "body": obj.body.name}]
     if kind.startswith("Construction"):
@@ -307,7 +313,7 @@ def geometry_of(obj):
         return None, None
 
 
-def entity_inputs(entity, creators: dict) -> tuple[dict, dict]:
+def entity_inputs(entity, creators: dict, geometry: bool = True) -> tuple[dict, dict]:
     """(inputs by property, unreadable properties with errors)."""
     kind = short_type(entity)
     if kind == "Sketch":
@@ -336,7 +342,7 @@ def entity_inputs(entity, creators: dict) -> tuple[dict, dict]:
             value = read()
             if value is None:
                 continue
-            refs = describe_ref(value, creators)
+            refs = describe_ref(value, creators, geometry)
         except Exception as exc:
             unreadable[attr] = f"{type(exc).__name__}: {exc}"
             continue
@@ -391,16 +397,17 @@ def ref_targets(ref: dict) -> tuple[set[str], set[str]]:
     return set(), set()
 
 
-def build_graph(timeline) -> dict:
+def build_graph(timeline, creators: dict = None) -> dict:
     """name -> index, referenced items, input bodies, output bodies."""
-    creators = face_creators(timeline)
+    if creators is None:
+        creators = face_creators(timeline)
     graph = {}
     for i in range(timeline.count):
         tl_obj = timeline.item(i)
         entity = None if tl_obj.isGroup else tl_obj.entity
         if entity is None:
             continue
-        inputs, _ = entity_inputs(entity, creators)
+        inputs, _ = entity_inputs(entity, creators, geometry=False)
         refs, bodies_in = set(), set()
         for ref_list in inputs.values():
             for ref in ref_list:
@@ -456,17 +463,22 @@ MATCH_TOLERANCE_CM = 1e-3
 MAX_CANDIDATES = 3
 
 
-def reference_snapshot(timeline) -> dict:
-    """{item: {property: [face/edge refs with geometry]}} of healthy items."""
-    creators = face_creators(timeline)
-    snapshot = {}
-    for i in range(timeline.count):
+def reference_snapshot(timeline, creators: dict, start: int = 0) -> tuple[dict, list]:
+    """Face/edge inputs (with geometry) of healthy items from index *start*.
+
+    Returns ({item: {property: [refs]}}, items whose inputs were unreadable —
+    typically fillets and offsets, which the API only exposes after rollTo).
+    """
+    snapshot, unreadable_items = {}, []
+    for i in range(start, timeline.count):
         tl_obj = timeline.item(i)
         if tl_obj.isGroup or tl_obj.isRolledBack or tl_obj.isSuppressed:
             continue
         if timeline_entry(tl_obj)["health"] == "error" or tl_obj.entity is None:
             continue
-        inputs, _ = entity_inputs(tl_obj.entity, creators)
+        inputs, unreadable = entity_inputs(tl_obj.entity, creators)
+        if unreadable:
+            unreadable_items.append(tl_obj.name)
         topology = {
             attr: [r for r in refs if r["kind"] in TOPOLOGY_KINDS and "at" in r]
             for attr, refs in inputs.items()
@@ -474,15 +486,14 @@ def reference_snapshot(timeline) -> dict:
         topology = {attr: refs for attr, refs in topology.items() if refs}
         if topology:
             snapshot[tl_obj.name] = topology
-    return snapshot
+    return snapshot, unreadable_items
 
 
-def check_references(timeline, snapshot: dict, find_body) -> list[dict]:
+def check_references(timeline, snapshot: dict, find_body, creators: dict) -> list[dict]:
     """Items whose snapshotted face/edge inputs are gone, with candidates.
 
     *find_body(name)* returns the body to search candidates in, or None.
     """
-    creators = face_creators(timeline)
     report = []
     for name, old_inputs in snapshot.items():
         try:

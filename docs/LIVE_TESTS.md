@@ -28,7 +28,8 @@
 
 ## 1. Связь
 
-- `ping`, `get_scene_info` — ответ из Fusion, не mock.
+- `ping`, `get_scene_info` — ответ из Fusion, не mock; `ping` возвращает `addon_hash`, предупреждения о версии нет.
+- Нарочно старый add-in (или правка в копии): каждый ответ начинается с предупреждения о версии.
 
 ## 2. Транзакции (новый документ)
 
@@ -45,6 +46,8 @@
 
 ## 3. Откат и журнал
 
+- `create_checkpoint` → `set_timeline_marker` назад → правка → `advance_marker` → `rollback_to_checkpoint`: откат не отказывает, правка снята, маркер вернулся (`timeline_matches_checkpoint: true`). Если нет — движение маркера попадает в undo, переделать.
+
 - `create_checkpoint a` → 3 правки → `rollback_to_checkpoint a`: `timeline_matches_checkpoint: true`.
 - Правка руками в UI после точки → `rollback_to_checkpoint` отказывает с `HISTORY_CONFLICT`.
 - Ctrl+Z в UI: снялась ли запись в `list_checkpoints.journal`. В логе add-in — id чужих команд: шумные (камера, выбор, измерения) внести в `IGNORED_COMMAND_IDS`.
@@ -55,6 +58,12 @@
 - `set_timeline_marker` назад/вперёд; `start_job compute_all` + `get_job`.
 
 ## 5. Чтение на большой модели (копия WING)
+
+- `get_dependents Sketch23 transitive`: `elapsed_s` первого вызова и второго (`graph_cached: true`, должно быть мгновенно).
+- `get_feature_info Fillet21` → есть `unreadable`; с `roll=true` они прочитаны, маркер на месте.
+- `get_sketch_info Sketch23`, `Sketch25`: связи, размеры, профили совпадают с UI; эскизы в подкомпоненте находятся.
+- `execute_code` с `print(1)`: длительность в журнале вызовов (было ~5 с).
+- `start_job advance_marker` из позиции 120: время прохода против одного прыжка маркера; `get_job wait_s=60` отвечает, пока идёт пересчёт.
 
 - `get_timeline problems_only`, `features_near` у моторамы, `get_feature_info Extrude18`, `get_dependents Sketch23 transitive`: правдоподобно ли и сколько секунд (таймаут 30 с).
 - Входы совпадают с UI (группы в таймлайне, грани по `entityToken`).

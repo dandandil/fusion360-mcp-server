@@ -40,6 +40,7 @@ NON_TRANSACTIONAL_COMMANDS = frozenset(
         "get_feature_info",
         "get_dependents",
         "features_near",
+        "get_sketch_info",
         "get_design_notes",
         "snapshot_references",
         "check_references",
@@ -57,6 +58,7 @@ NON_TRANSACTIONAL_COMMANDS = frozenset(
         # drive the UI or wait on Fusion; marker moves are journaled as
         # untracked by the bridge (their undo behaviour is unverified)
         "set_timeline_marker",
+        "advance_marker",
         "compute_all",
         "undo",
         "set_design_type",

@@ -60,6 +60,7 @@ _MUTATION_MOCKS: frozenset[str] = frozenset(
         "create_ucs",
         "set_color",
         "set_timeline_marker",
+        "advance_marker",
         "recreate_feature",
     }
 )
@@ -496,6 +497,48 @@ def _set_timeline_marker(_p: dict) -> dict:
     return {"marker_position": 1, "count": 2, "problems": {}}
 
 
+def _advance_marker(_p: dict) -> dict:
+    return {
+        "start": 1,
+        "marker_position": 2,
+        "count": 2,
+        "stopped_at": None,
+        "warnings": [],
+        "elapsed_s": 0.1,
+    }
+
+
+def _get_sketch_info(p: dict) -> dict:
+    return {
+        "name": p.get("name", "Sketch1"),
+        "plane": "ConstructionPlane",
+        "fully_constrained": True,
+        "counts": {
+            "curves": 1,
+            "points": 1,
+            "constraints": 0,
+            "dimensions": 1,
+            "profiles": 1,
+        },
+        "curves": [
+            {"id": "c0", "type": "SketchCircle", "center": [0, 0, 0], "radius": 1.0}
+        ],
+        "points": [],
+        "constraints": [],
+        "dimensions": [
+            {
+                "type": "SketchDiameterDimension",
+                "entities": ["c0"],
+                "parameter": "d1",
+                "expression": "20 mm",
+                "value": 2.0,
+            }
+        ],
+        "profiles": [{"index": 0, "loops": 1, "inner_loops": 0, "area": 3.14159}],
+        "truncated": False,
+    }
+
+
 def _compute_all(_p: dict) -> dict:
     return {"completed": True, "problems": {}}
 
@@ -513,7 +556,12 @@ def _recreate_feature(p: dict) -> dict:
 
 
 def _snapshot_references(_p: dict) -> dict:
-    return {"items": 1, "references": 1}
+    return {
+        "items": 1,
+        "references": 1,
+        "marker_position": 2,
+        "unreadable_items": [],
+    }
 
 
 def _check_references(_p: dict) -> dict:
@@ -1226,6 +1274,8 @@ _DISPATCH: dict[str, Any] = {
     "get_job": _get_job,
     "dry_run": _dry_run,
     "set_timeline_marker": _set_timeline_marker,
+    "advance_marker": _advance_marker,
+    "get_sketch_info": _get_sketch_info,
     "compute_all": _compute_all,
     "recreate_feature": _recreate_feature,
     "snapshot_references": _snapshot_references,

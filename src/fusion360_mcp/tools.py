@@ -355,13 +355,18 @@ TOOLS: list[dict] = [
         "name": "get_job",
         "title": "Get Job",
         "description": (
-            "State of a job from start_job: 'running', or 'done' with the "
-            "tool's own result (an error result if the tool failed)."
+            "State of a job from start_job (or of a call that outlived the "
+            "30 s wait): 'running', or 'done' with the tool's own result (an "
+            "error result if the tool failed). wait_s waits up to that long "
+            "(max 120) for the job to finish instead of returning at once."
         ),
         "inputSchema": {
             "type": "object",
             "required": ["job_id"],
-            "properties": {"job_id": {"type": "string"}},
+            "properties": {
+                "job_id": {"type": "string"},
+                "wait_s": {"type": "number", "default": 0},
+            },
         },
     },
     {
@@ -390,8 +395,9 @@ TOOLS: list[dict] = [
             "Move the timeline marker: to an index (position), before or "
             "after a named item, or to the end. Items after the marker are "
             "not computed, so edits recompute only up to it. Returns the "
-            "current timeline problems. Blocks rollback_to_checkpoint across "
-            "it (undo behaviour of marker moves is not tracked)."
+            "current timeline problems. Checkpoints survive marker moves: "
+            "rollback restores the marker position. To walk forward checking "
+            "each item, use advance_marker."
         ),
         "inputSchema": {
             "type": "object",
@@ -458,13 +464,45 @@ TOOLS: list[dict] = [
         },
     },
     {
+        "name": "advance_marker",
+        "title": "Advance Marker",
+        "description": (
+            "Move the timeline marker forward one item at a time to an item "
+            "(to: included), a position, or the end, and stop at the first "
+            "item that fails (stop_on: error | warning | never). A full pass "
+            "costs about one recompute and names the exact failing item; "
+            "repair it and call again. Long: run with start_job."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "to": {"type": "string", "description": "Item name"},
+                "position": {"type": "integer"},
+                "stop_on": {
+                    "type": "string",
+                    "enum": ["error", "warning", "never"],
+                    "default": "error",
+                },
+            },
+        },
+    },
+    {
         "name": "snapshot_references",
         "title": "Snapshot References",
         "description": (
-            "Remember every face/edge input of the timeline (location and "
-            "size) so check_references can tell which ones an edit lost."
+            "Remember the face/edge inputs (location and size) of the items "
+            "after 'after' (default: all) so check_references can tell which "
+            "ones an edit lost. Check at the same marker position. Items "
+            "whose inputs are only readable with the marker rolled back "
+            "(often fillets, offsets) are listed as unreadable_items and not "
+            "covered. Slow on big models; optional."
         ),
-        "inputSchema": {"type": "object", "properties": {}},
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "after": {"type": "string", "description": "Item name"},
+            },
+        },
     },
     {
         "name": "check_references",
@@ -844,13 +882,43 @@ TOOLS: list[dict] = [
             "referencePlane, projected, ...): sketches and features by name, "
             "faces/edges by body and the features that created them. "
             "Parameters are the item's model parameters (e.g. d112) with "
-            "expressions and the parameters that depend on them."
+            "expressions and the parameters that depend on them. Some inputs "
+            "(fillet edges, participant bodies, a sketch plane on a face) are "
+            "only readable with the marker before the item: they are listed "
+            "in 'unreadable'; roll=true re-reads them that way and puts the "
+            "marker back, which recomputes everything after the item."
         ),
         "inputSchema": {
             "type": "object",
             "required": ["name"],
             "properties": {
                 "name": {"type": "string", "description": "Timeline item name"},
+                "roll": {"type": "boolean", "default": False},
+            },
+        },
+    },
+    {
+        "name": "get_sketch_info",
+        "title": "Get Sketch Info",
+        "description": (
+            "One sketch in full: curves with ids (c0..) and geometry "
+            "(start/end/center/radius, cm, sketch space), construction / "
+            "reference / fixed flags; geometric constraints and dimensions "
+            "with the ids they bind (dimensions: parameter, expression, "
+            "value, driven); whether it is fully constrained; profiles with "
+            "index, area, centroid, box and loop counts (use the index for "
+            "extrude / recreate_feature). Searches all components."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+                "name": {"type": "string"},
+                "limit": {
+                    "type": "integer",
+                    "default": 200,
+                    "description": "Max curves / constraints / dimensions listed",
+                },
             },
         },
     },
@@ -2770,6 +2838,7 @@ TOOLS: list[dict] = [
 # side-effect profile so MCP clients can auto-approve safe operations.
 
 _READ_ONLY = {
+    "get_sketch_info",
     "get_scene_info",
     "get_object_info",
     "get_bounding_box",
@@ -2804,6 +2873,7 @@ _DESTRUCTIVE = {
     "start_job",
 }
 _IDEMPOTENT = {
+    "get_sketch_info",
     "ping",
     "get_scene_info",
     "get_object_info",
