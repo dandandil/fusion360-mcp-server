@@ -9,12 +9,14 @@ import json
 import logging
 import os
 import re
+import time
 
 import anyio
 import click
 import mcp.types as types
 from mcp.server.lowlevel import Server
 
+from .call_log import CallLog, log_dir
 from .connection import (
     _DEFAULT_HOST,
     _DEFAULT_PORT,
@@ -45,6 +47,10 @@ def _send(
         return mock_command(command_type, params)
     conn = get_connection(host=host, port=port)
     return conn.send_command(command_type, params)
+
+
+def _error_outcome(exc: Exception, kind: str) -> dict:
+    return {"ok": False, "error_kind": kind, "message": str(exc)}
 
 
 def _fusion_error_result(name: str, exc: FusionError) -> types.CallToolResult:
@@ -116,6 +122,8 @@ def _format_result(
         ]
         if result.get("rolled_back"):
             lines.append("  rolled back: the design is unchanged by this call")
+        if result.get("user_actions"):
+            lines.append(f"  user_actions: {result['user_actions']}")
         hints = result.get("hints") or []
         if hints:
             lines.append("  hints:")
@@ -184,6 +192,7 @@ def main(mode: str, host: str, port: int) -> int:
     """Fusion360 MCP Server — connects Claude to Fusion 360."""
 
     app = Server("fusion360-mcp-server", instructions=INSTRUCTIONS)
+    calls = CallLog(log_dir() if mode != "mock" else None)
 
     # ── tools ────────────────────────────────────────────────────────
 
@@ -200,13 +209,16 @@ def main(mode: str, host: str, port: int) -> int:
         if not tool_def:
             raise ValueError(f"Unknown tool: {name}")
 
+        started = time.monotonic()
         try:
             result = _send(mode, name, arguments, host=host, port=port)
         except FusionError as exc:
             # Structured failure from the add-in (or a non-retried
             # mutation timeout) — the connection itself is healthy.
+            calls.record(name, arguments, started, _error_outcome(exc, exc.error_kind))
             return _fusion_error_result(name, exc)
         except Exception as exc:
+            calls.record(name, arguments, started, _error_outcome(exc, "CONNECTION"))
             reset_connection()
             content = [
                 types.TextContent(
@@ -221,6 +233,7 @@ def main(mode: str, host: str, port: int) -> int:
                 isError=True,
             )
 
+        calls.record(name, arguments, started, result)
         return _format_result(name, result)
 
     # ── resources ────────────────────────────────────────────────────

@@ -38,6 +38,11 @@
 - `execute_code` с созданием фичи — тоже один шаг.
 - Вызов во время открытой пользователем команды (например, диалог Extrude в UI): что происходит.
 
+- Долгий вызов (`execute_code` с циклом на 40 с): ответ `state: running` + `job_id`, `get_job` возвращает итог, правка применена один раз.
+- Удаление фичи с зависимыми через `execute_code` (копия WING: `Extrude18`): в ответе `timeline_changes.removed_items` совпадает с тем, что пропало в UI.
+- Правка в UI между вызовами: следующий ответ содержит `user_actions`.
+- После сессии на PC-108-7 есть `~/.local/state/fusion360-mcp/calls-*.jsonl`.
+
 ## 3. Откат и журнал
 
 - `create_checkpoint a` → 3 правки → `rollback_to_checkpoint a`: `timeline_matches_checkpoint: true`.
@@ -57,11 +62,11 @@
 
 ## 6. Рендер
 
-- `render_view focus=Body73`, `focus=Sketch23`: кадр на узел, у эскиза видны размеры, `camera.view_extents` ≈ `requested_extents`, камера пользователя восстановлена.
+- `render_view focus=Body73 show_only=[Body73]` (остальные тела вернулись видимыми, в undo нет лишних шагов), `focus=Sketch23`: кадр на узел, у эскиза видны размеры, `camera.view_extents` ≈ `requested_extents`, камера пользователя восстановлена.
 
 ## 7. Пересоздание фич (копия WING)
 
-- `recreate_feature OffsetFaces5` с новыми точками граней; затем `SweepFeature` с новым профилем: то же место в таймлайне, то же имя, зависимые фичи здоровы; провал откатывается целиком.
+- `recreate_feature OffsetFaces5` с новыми точками граней; затем `SweepFeature` и `ExtrudeFeature` (`Extrude18`, двусторонняя) с новым профилем, `RemoveFeature` с новым телом: то же место в таймлайне, то же имя, зависимые фичи здоровы; провал откатывается целиком; если удаление оригинала тянет за собой зависимые — отказ со списком.
 
 ## 8. Заодно (для планов)
 

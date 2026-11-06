@@ -9,6 +9,15 @@ INSTRUCTIONS = """\
 Fusion 360 CAD tools. Units are centimeters. Each design-editing call is one \
 undo step; a failed call is rolled back (rolled_back: true).
 
+Read these fields in every result:
+- state: running + job_id — the call outlived the 30 s wait and goes on in \
+Fusion; poll get_job, never repeat the call.
+- timeline_changes.removed_items — Fusion deleted these items along with your \
+edit (cascade); undo unless that was intended. new_problems — items that \
+started failing.
+- user_actions — commands the user ran in Fusion since your last call; re-read \
+the affected area before continuing.
+
 Editing an existing model:
 1. Read before proposing: get_design_notes, get_timeline (problems_only), \
 features_near to find what makes up the area, get_feature_info for those \

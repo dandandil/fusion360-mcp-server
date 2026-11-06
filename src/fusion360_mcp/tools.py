@@ -419,10 +419,13 @@ TOOLS: list[dict] = [
             "Rebuild a feature whose inputs the API cannot change, at the "
             "same timeline position and with the same name and values: "
             "OffsetFacesFeature with new faces (face_points, cm, one point "
-            "on each face) or SweepFeature with a new profile "
-            "(profile_sketch, profile_index; same path). Items that "
-            "referenced the old feature's faces may break: run "
-            "snapshot_references before and check_references after."
+            "on each face); SweepFeature or ExtrudeFeature with a new "
+            "profile (profile_sketch, profile_index; same path / extents, "
+            "taper, operation, participant bodies); RemoveFeature with a "
+            "new body. If deleting the original would also delete items "
+            "that depend on it, the call is rolled back and names them. "
+            "Items that referenced the old feature's faces may still break: "
+            "run snapshot_references before and check_references after."
         ),
         "inputSchema": {
             "type": "object",
@@ -434,7 +437,18 @@ TOOLS: list[dict] = [
                     "items": {"type": "array", "items": {"type": "number"}},
                 },
                 "profile_sketch": {"type": "string"},
-                "profile_index": {"type": "integer", "default": 0},
+                "profile_index": {
+                    "description": "Profile index, or a list of indices",
+                    "anyOf": [
+                        {"type": "integer"},
+                        {"type": "array", "items": {"type": "integer"}},
+                    ],
+                    "default": 0,
+                },
+                "body": {
+                    "type": "string",
+                    "description": "RemoveFeature: body to remove",
+                },
                 "tolerance": {
                     "type": "number",
                     "description": "Face search radius, cm",
@@ -2739,6 +2753,12 @@ TOOLS: list[dict] = [
                 "radius": {
                     "type": "number",
                     "description": "Radius around the center to show, cm",
+                },
+                "show_only": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Body names to keep visible; others are "
+                    "hidden for this capture only",
                 },
             },
         },

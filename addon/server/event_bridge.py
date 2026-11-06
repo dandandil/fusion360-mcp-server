@@ -148,18 +148,27 @@ class EventBridge:
         item = self._enqueue(command)
 
         if not item.done.wait(timeout=timeout):
-            # The client has given up.  Cancel the item so drain_queue
-            # skips it instead of executing it late — a late execution
-            # plus a client retry would apply mutations twice.
-            item.cancelled = True
-            log.warning("Command %s timed out after %ss (cancelled)", cmd_type, timeout)
+            # The command keeps running on the main thread: hand it over to
+            # the job table so the client can poll it instead of retrying.
+            job_id = self._add_job(item, cmd_type)
+            log.info(
+                "Command %s still running after %ss -> job %s",
+                cmd_type,
+                timeout,
+                job_id,
+            )
             return {
-                "status": "error",
-                "error_kind": "TIMEOUT",
-                "message": f"Command timed out after {timeout}s",
-                "hints": ["run long commands with start_job and poll get_job"],
+                "status": "success",
+                "result": {
+                    "ok": True,
+                    "state": "running",
+                    "job_id": job_id,
+                    "tool": cmd_type,
+                    "message": f"Still running in Fusion after {timeout:g}s. "
+                    "Poll get_job with this job_id; do not repeat the call.",
+                },
             }
-        return self._response(item)
+        return self._with_user_actions(self._response(item))
 
     def _enqueue(self, command: dict) -> WorkItem:
         item = WorkItem(command)
@@ -207,18 +216,22 @@ class EventBridge:
             command = self._resolve_dry_run(command)
         except ValueError as exc:
             return _failure("INVALID_INPUT", str(exc))
-        job_id = uuid.uuid4().hex[:8]
-        with self._jobs_lock:
-            self._jobs[job_id] = {
-                "item": self._enqueue(command),
-                "tool": command["type"],
-                "started": time.monotonic(),
-            }
-            self._prune_jobs()
+        job_id = self._add_job(self._enqueue(command), command["type"])
         return {
             "status": "success",
             "result": {"ok": True, "job_id": job_id, "tool": command["type"]},
         }
+
+    def _add_job(self, item: WorkItem, tool: str) -> str:
+        job_id = uuid.uuid4().hex[:8]
+        with self._jobs_lock:
+            self._jobs[job_id] = {
+                "item": item,
+                "tool": tool,
+                "started": time.monotonic(),
+            }
+            self._prune_jobs()
+        return job_id
 
     def _get_job(self, job_id) -> dict:
         with self._jobs_lock:
@@ -246,7 +259,19 @@ class EventBridge:
             }
         else:
             result = dict(response["result"])
-        return {"status": "success", "result": {**result, "state": "done", **info}}
+        return self._with_user_actions(
+            {"status": "success", "result": {**result, "state": "done", **info}}
+        )
+
+    def _with_user_actions(self, response: dict) -> dict:
+        """Attach commands the user ran in Fusion since the last response."""
+        result = response.get("result") if isinstance(response, dict) else None
+        if self._history is None or not isinstance(result, dict):
+            return response
+        actions = self._history.take_user_actions()
+        if actions:
+            result["user_actions"] = actions
+        return response
 
     def _prune_jobs(self):
         done = [k for k, j in self._jobs.items() if j["item"].done.is_set()]
@@ -297,8 +322,13 @@ class EventBridge:
     def _execute(self, command: dict) -> dict:
         return self._handler.execute_command(command)
 
-    def _probe(self) -> dict:
-        return self._handler.timeline_problems()
+    def _probe(self):
+        """Timeline names and problems, or None when they cannot be read."""
+        try:
+            return self._handler.timeline_state()
+        except Exception as exc:
+            log.warning("Timeline probe failed: %s", exc)
+            return None
 
     def _record_untracked(self, cmd_type: str, response: dict):
         """Journal edits made outside a transaction, so rollback stops there."""

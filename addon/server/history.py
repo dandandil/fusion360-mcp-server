@@ -14,6 +14,8 @@ foreign entries are in the way or the timeline count shows an edit the
 journal did not see.
 """
 
+import threading
+
 import adsk.core
 import adsk.fusion
 
@@ -57,6 +59,9 @@ class History:
         self._checkpoints = {}
         # Undo commands issued by rollback; their terminations must not pop
         self._expected_undos = 0
+        # Foreign commands not yet reported to the client (socket thread reads)
+        self._user_actions = []
+        self._user_actions_lock = threading.Lock()
         self._terminated_handler = _TerminatedHandler(self)
         app.userInterface.commandTerminated.add(self._terminated_handler)
 
@@ -87,9 +92,21 @@ class History:
                 self._expected_undos -= 1
             else:
                 self._truncate(len(self._entries) - 1)
+                self._note_user_action(command_id)
             return
-        log.info("Foreign command completed: %s", command_id)
+        # debug: info would also print into execute_code output
+        log.debug("Foreign command completed: %s", command_id)
         self._append(FOREIGN, command_id)
+        self._note_user_action(command_id)
+
+    def _note_user_action(self, command_id: str):
+        with self._user_actions_lock:
+            self._user_actions.append(command_id)
+
+    def take_user_actions(self) -> list:
+        with self._user_actions_lock:
+            actions, self._user_actions = self._user_actions, []
+        return actions
 
     def _append(self, kind: str, name: str):
         self._entries.append(

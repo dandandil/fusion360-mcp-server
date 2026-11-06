@@ -144,6 +144,7 @@ class _App:
         self.userInterface = _UI(self)
         self.timeline = types.SimpleNamespace(count=0)
         self.problems = {}
+        self.names = []
         self.activeDocument = types.SimpleNamespace(
             name="Doc1", products=_Products(_Design(self.timeline))
         )
@@ -173,12 +174,14 @@ class _Handler:
         self._app = app
         self.calls = []
 
-    def timeline_problems(self):
-        return dict(self._app.problems)
+    def timeline_state(self):
+        return {"names": list(self._app.names), "problems": dict(self._app.problems)}
 
     def execute_command(self, command):
         self.calls.append(command["type"])
         params = command.get("params", {})
+        if params.get("removes"):
+            self._app.names.remove(params["removes"])
         if params.get("breaks"):
             self._app.problems[params["breaks"]] = {"health": "error"}
         if params.get("fail"):
@@ -338,13 +341,18 @@ def test_command_that_never_starts_is_released(setup, addon, monkeypatch):
     assert setup.handler.calls == []
 
 
-def test_timed_out_item_does_not_execute_late(setup):
+def test_timed_out_item_becomes_a_job(setup):
     t, box = _submit(setup.bridge, "extrude", timeout=0.01)
     t.join(2)
-    assert box["r"]["error_kind"] == "TIMEOUT"
-    setup.bridge.drain_queue()  # skipped: cancelled before start
+    running = box["r"]["result"]
+    assert running["state"] == "running"
+    setup.bridge.drain_queue()  # still executes: the client polls it
     setup.cmd_def.run_scheduled()
-    assert setup.handler.calls == []
+    assert setup.handler.calls == ["extrude"]
+    done = setup.bridge.submit(
+        {"type": "get_job", "params": {"job_id": running["job_id"]}}
+    )["result"]
+    assert (done["state"], done["ok"]) == ("done", True)
 
 
 def test_stop_releases_in_flight_item(setup):
@@ -445,7 +453,6 @@ def test_undo_past_checkpoint_drops_it(setup):
     assert _call(setup, "list_checkpoints")["checkpoints"] == []
 
 
-
 # ── jobs, dry runs, untracked edits ──────────────────────────────────
 
 
@@ -457,6 +464,19 @@ def test_dry_run_reports_problems_and_rolls_back(setup):
     assert setup.app.timeline.count == 0
     assert setup.app.problems == {}
     assert _call(setup, "list_checkpoints")["journal"] == []
+
+
+def test_edit_reports_cascade_removed_items(setup):
+    setup.app.names = ["Extrude18", "OffsetFaces5"]
+    result = _call(setup, "execute_code", removes="OffsetFaces5")
+    assert result["timeline_changes"] == {"removed_items": ["OffsetFaces5"]}
+    assert "timeline_changes" not in _call(setup, "extrude")
+
+
+def test_user_actions_are_reported_once(setup):
+    setup.app.ui_edit("ExtrudeCommand")
+    assert _call(setup, "get_scene_info")["user_actions"] == ["ExtrudeCommand"]
+    assert "user_actions" not in _call(setup, "get_scene_info")
 
 
 def test_dry_run_rejects_read_only_tool(setup):

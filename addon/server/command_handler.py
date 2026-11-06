@@ -633,6 +633,15 @@ class CommandHandler:
             for i in items["items"]
         }
 
+    def timeline_state(self) -> dict:
+        """Item names and problems; the transaction diffs two of these."""
+        design = self._design()
+        if design.designType != adsk.fusion.DesignTypes.ParametricDesignType:
+            return {"names": [], "problems": {}}
+        timeline = design.timeline
+        names = [timeline.item(i).name for i in range(timeline.count)]
+        return {"names": names, "problems": self.timeline_problems()}
+
     def set_timeline_marker(
         self,
         position: int = None,
@@ -665,16 +674,23 @@ class CommandHandler:
         problems = self.timeline_problems()
         return {"completed": completed, "problems": problems}
 
-    # Feature types recreate_feature can rebuild; the API cannot change
-    # their inputs in place (OffsetFacesFeature faces, SweepFeature profile)
-    _RECREATABLE = ("OffsetFacesFeature", "SweepFeature")
+    # Feature types recreate_feature can rebuild: the API cannot change these
+    # inputs in place (OffsetFacesFeature faces, SweepFeature profile,
+    # RemoveFeature body) or fails when the old one is lost (Extrude profile)
+    _RECREATABLE = (
+        "OffsetFacesFeature",
+        "SweepFeature",
+        "ExtrudeFeature",
+        "RemoveFeature",
+    )
 
     def recreate_feature(
         self,
         name: str,
         face_points: list = None,
         profile_sketch: str = None,
-        profile_index: int = 0,
+        profile_index=0,
+        body: str = None,
         tolerance: float = 0.01,
     ):
         """Rebuild a feature at the same timeline position with new inputs."""
@@ -690,31 +706,22 @@ class CommandHandler:
         marker_at_end = timeline.markerPosition == timeline.count
         marker = timeline.markerPosition
         component = old.parentComponent
+        names_before = self.timeline_state()["names"]
         # Inputs of a rolled-back feature are unreliable: read them first
-        if kind == "OffsetFacesFeature":
-            if not face_points:
-                raise RuntimeError("Pass face_points: one [x, y, z] (cm) per face")
-            params = self._parameters_created_by(old)
-            if not params:
-                raise RuntimeError(f"{name} has no distance parameter to copy")
-            settings = {"distance": params[0]["expression"]}
-        else:
-            if not profile_sketch:
-                raise RuntimeError("Pass profile_sketch (and profile_index)")
-            settings = self._sweep_settings(old)
+        settings = self._recreate_settings(kind, old, face_points, profile_sketch, body)
 
         if not tl_obj.rollTo(True):
             raise RuntimeError(f"Could not roll the timeline to before {name}")
-        if kind == "OffsetFacesFeature":
-            faces = self._faces_at(component, face_points, tolerance)
-            new = component.features.offsetFacesFeatures.add(
-                component.features.offsetFacesFeatures.createInput(
-                    faces, adsk.core.ValueInput.createByString(settings["distance"])
-                )
-            )
-        else:
-            profile = self._sketch_by_name(profile_sketch).profiles.item(profile_index)
-            new = self._create_sweep(component, profile, settings)
+        new = self._recreate(
+            kind,
+            component,
+            settings,
+            profile_sketch,
+            profile_index,
+            face_points,
+            body,
+            tolerance,
+        )
         if not old.deleteMe():
             raise RuntimeError(f"Could not delete the original {name}")
         new.name = name
@@ -723,6 +730,15 @@ class CommandHandler:
         else:
             timeline.markerPosition = marker
 
+        remaining = set(self.timeline_state()["names"])
+        lost = [n for n in names_before if n not in remaining]
+        if lost:
+            # Deleting the original also deleted its dependents; the
+            # transaction rolls this back
+            raise RuntimeError(
+                f"Recreating {name} deleted dependent items {lost}; rolled back. "
+                "Repoint or recreate those first, or edit the original inputs."
+            )
         entry = _graph.timeline_entry(new.timelineObject)
         return {
             "recreated": name,
@@ -730,9 +746,112 @@ class CommandHandler:
             "index": entry["index"],
             "health": entry["health"],
             "message": entry.get("message", ""),
-            "settings": {k: v for k, v in settings.items() if k != "path"},
+            "settings": _describe_settings(settings),
             "problems": self.timeline_problems(),
         }
+
+    def _recreate_settings(self, kind, old, face_points, profile_sketch, body):
+        if kind == "OffsetFacesFeature":
+            if not face_points:
+                raise RuntimeError("Pass face_points: one [x, y, z] (cm) per face")
+            params = self._parameters_created_by(old)
+            if not params:
+                raise RuntimeError(f"{old.name} has no distance parameter to copy")
+            return {"distance": params[0]["expression"]}
+        if kind == "RemoveFeature":
+            if not body:
+                raise RuntimeError("Pass body: the name of the body to remove")
+            return {}
+        if not profile_sketch:
+            raise RuntimeError("Pass profile_sketch (and profile_index)")
+        if kind == "SweepFeature":
+            return self._sweep_settings(old)
+        return self._extrude_settings(old)
+
+    def _recreate(
+        self,
+        kind,
+        component,
+        settings,
+        profile_sketch,
+        profile_index,
+        face_points,
+        body,
+        tolerance,
+    ):
+        features = component.features
+        if kind == "OffsetFacesFeature":
+            faces = self._faces_at(component, face_points, tolerance)
+            return features.offsetFacesFeatures.add(
+                features.offsetFacesFeatures.createInput(
+                    faces, adsk.core.ValueInput.createByString(settings["distance"])
+                )
+            )
+        if kind == "RemoveFeature":
+            return features.removeFeatures.add(self._body_by_name(body))
+        profile = self._profiles(profile_sketch, profile_index)
+        if kind == "SweepFeature":
+            return self._create_sweep(component, profile, settings)
+        return self._create_extrude(component, profile, settings)
+
+    def _profiles(self, sketch_name: str, index):
+        """One profile, or an ObjectCollection when *index* is a list."""
+        profiles = self._sketch_by_name(sketch_name).profiles
+        if not isinstance(index, list):
+            return profiles.item(index)
+        collection = adsk.core.ObjectCollection.create()
+        for i in index:
+            collection.add(profiles.item(i))
+        return collection
+
+    def _extrude_settings(self, extrude) -> dict:
+        if extrude.isSolid is False:
+            raise RuntimeError("Surface extrudes are not supported yet")
+        settings = {
+            "extent_type": extrude.extentType,
+            "operation": extrude.operation,
+            # names: body references are re-read after rollTo
+            "participant_bodies": [b.name for b in extrude.participantBodies or []],
+            "extent_one": _extent_settings(extrude.extentOne),
+            "taper_one": _expression(extrude.taperAngleOne),
+        }
+        if extrude.hasTwoExtents:
+            settings["extent_two"] = _extent_settings(extrude.extentTwo)
+            settings["taper_two"] = _expression(extrude.taperAngleTwo)
+        start = extrude.startExtent
+        if _graph.short_type(start) == "OffsetStartDefinition":
+            settings["start_offset"] = _expression(start.offset)
+        return settings
+
+    def _create_extrude(self, component, profile, settings):
+        extrudes = component.features.extrudeFeatures
+        inp = extrudes.createInput(profile, settings["operation"])
+        value = adsk.core.ValueInput.createByString
+        taper_one = value(settings["taper_one"] or "0 deg")
+        one = settings["extent_one"]
+        extent_type = settings["extent_type"]
+        if extent_type == adsk.fusion.FeatureExtentTypes.SymmetricFeatureExtentType:
+            inp.setSymmetricExtent(
+                value(one["distance"]), one.get("full_length", False), taper_one
+            )
+        elif extent_type == adsk.fusion.FeatureExtentTypes.TwoSidesFeatureExtentType:
+            inp.setTwoSidesExtent(
+                _extent_definition(one),
+                _extent_definition(settings["extent_two"]),
+                taper_one,
+                value(settings["taper_two"] or "0 deg"),
+            )
+        else:
+            inp.setOneSideExtent(_extent_definition(one), _direction(one), taper_one)
+        if "start_offset" in settings:
+            inp.startExtent = adsk.fusion.OffsetStartDefinition.create(
+                value(settings["start_offset"])
+            )
+        if settings["participant_bodies"]:
+            inp.participantBodies = [
+                self._body_by_name(n) for n in settings["participant_bodies"]
+            ]
+        return extrudes.add(inp)
 
     _SWEEP_VALUES = ("distanceOne", "distanceTwo", "taperAngle", "twistAngle")
 
@@ -3991,7 +4110,29 @@ class CommandHandler:
         focus: str = None,
         center: list = None,
         radius: float = None,
+        show_only: list = None,
     ):
+        """render_view, with every body outside *show_only* hidden meanwhile."""
+        hidden = self._hide_bodies_except(show_only) if show_only else []
+        try:
+            return self._render_view(view, width, height, fit, focus, center, radius)
+        finally:
+            for body in hidden:
+                body.isLightBulbOn = True
+
+    def _hide_bodies_except(self, names: list) -> list:
+        for name in names:
+            self._body_by_name(name)  # raises for an unknown name
+        keep = set(names)
+        hidden = []
+        for component in self._design().allComponents:
+            for body in component.bRepBodies:
+                if body.isLightBulbOn and body.name not in keep:
+                    body.isLightBulbOn = False
+                    hidden.append(body)
+        return hidden
+
+    def _render_view(self, view, width, height, fit, focus, center, radius):
         """Save the active viewport to a PNG and return base64-encoded bytes.
 
         * ``view`` — ``"current"`` keeps the existing camera, or one of
@@ -4163,15 +4304,21 @@ class CommandHandler:
         cam.eye = adsk.core.Point3D.create(*eye)
         cam.target = adsk.core.Point3D.create(*center)
         cam.upVector = adsk.core.Vector3D.create(*up_vec)
-        cam.viewExtents = radius * 1.1
+        extents = radius * 1.1
+        cam.viewExtents = extents
         viewport.camera = cam
-        viewport.refresh()
         applied = viewport.camera
+        if abs(applied.viewExtents - extents) > 0.05 * extents:
+            # Assigning eye/target can reset the extents: apply them again
+            applied.viewExtents = extents
+            viewport.camera = applied
+            applied = viewport.camera
+        viewport.refresh()
         return {
             "eye": [applied.eye.x, applied.eye.y, applied.eye.z],
             "target": [applied.target.x, applied.target.y, applied.target.z],
             "view_extents": applied.viewExtents,
-            "requested_extents": radius * 1.1,
+            "requested_extents": extents,
         }
 
     @staticmethod
@@ -4228,3 +4375,65 @@ class CommandHandler:
         cam.upVector = up
         cam.isSmoothTransition = False
         viewport.camera = cam
+
+
+# ── recreate_feature helpers ─────────────────────────────────────────
+
+
+def _expression(parameter):
+    return parameter.expression if parameter is not None else None
+
+
+def _extent_settings(extent) -> dict:
+    """Plain description of an ExtentDefinition, readable after rollTo."""
+    kind = _graph.short_type(extent)
+    if kind == "DistanceExtentDefinition":
+        return {"kind": "distance", "distance": extent.distance.expression}
+    if kind == "SymmetricExtentDefinition":
+        return {
+            "kind": "symmetric",
+            "distance": extent.distance.expression,
+            "full_length": extent.isFullLength,
+        }
+    if kind == "ThroughAllExtentDefinition":
+        return {"kind": "all", "positive": extent.isPositiveDirection}
+    if kind == "ToEntityExtentDefinition":
+        return {
+            "kind": "to",
+            "entity": extent.entity,
+            "chained": extent.isChained,
+            "offset": _expression(extent.offset),
+        }
+    raise RuntimeError(f"Extent {kind} is not supported yet")
+
+
+def _extent_definition(settings: dict):
+    value = adsk.core.ValueInput.createByString
+    kind = settings["kind"]
+    if kind in ("distance", "symmetric"):
+        return adsk.fusion.DistanceExtentDefinition.create(value(settings["distance"]))
+    if kind == "all":
+        extent = adsk.fusion.ThroughAllExtentDefinition.create()
+        extent.isPositiveDirection = settings["positive"]
+        return extent
+    return adsk.fusion.ToEntityExtentDefinition.create(
+        settings["entity"], settings["chained"], value(settings["offset"] or "0 cm")
+    )
+
+
+def _direction(settings: dict):
+    directions = adsk.fusion.ExtentDirections
+    if settings["kind"] == "all" and not settings["positive"]:
+        return directions.NegativeExtentDirection
+    return directions.PositiveExtentDirection
+
+
+def _describe_settings(settings: dict) -> dict:
+    """Settings without API objects, for the response."""
+
+    def plain(value):
+        if isinstance(value, dict):
+            return {k: plain(v) for k, v in value.items() if k != "entity"}
+        return value
+
+    return {k: plain(v) for k, v in settings.items() if k != "path"}

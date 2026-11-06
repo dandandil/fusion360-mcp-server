@@ -6,8 +6,10 @@ after the command; setting ``executeFailed`` aborts that step and rolls
 the edits back.  ``CommandDefinition.execute()`` is deferred until the
 current event handler returns, so completion is reported via callback.
 
-A dry run (command flagged ``dry_run``) is always rolled back; its result
-reports how timeline problems changed while the edit was applied.
+The timeline is probed before and after each edit: removed items (cascade
+deletes) and new problems are reported as ``timeline_changes``.  A dry run
+(command flagged ``dry_run``) is always rolled back and reports the same
+diff as ``dry_run``.
 """
 
 import time
@@ -86,6 +88,16 @@ def problem_diff(before: dict, after: dict) -> dict:
     return {"new_problems": new, "resolved_problems": resolved}
 
 
+def timeline_changes(before: dict, after: dict) -> dict:
+    """Diff two {"names", "problems"} timeline probes."""
+    remaining = set(after["names"])
+    removed = [name for name in before["names"] if name not in remaining]
+    return {
+        "removed_items": removed,
+        **problem_diff(before["problems"], after["problems"]),
+    }
+
+
 def _is_failure(response: dict) -> bool:
     if response.get("status") == "error":
         return True
@@ -123,10 +135,10 @@ class _DestroyHandler(adsk.core.CommandEventHandler):
 class TransactionRunner:
     """Runs work items one at a time, each inside its own Fusion Command.
 
-    *execute(command) -> response* does the work; *probe() -> problems* reads
-    timeline problems for dry runs; *on_committed(cmd_type)* is called for
-    each successful (not rolled back) item; *on_finished()* is called on the
-    main thread once an item is done so the caller can continue.
+    *execute(command) -> response* does the work; *probe()* reads the
+    timeline names and problems (None if unreadable); *on_committed(cmd_type)*
+    is called for each successful (not rolled back) item; *on_finished()* is
+    called on the main thread once an item is done so the caller can continue.
     """
 
     def __init__(self, ui, execute, probe, on_committed, on_finished):
@@ -199,10 +211,10 @@ class TransactionRunner:
             return
         dry_run = item.command.get("dry_run", False)
         try:
-            before = self._probe() if dry_run else None
+            before = self._probe()
             response = self._execute(item.command)
-            if dry_run and not _is_failure(response):
-                response["result"]["dry_run"] = problem_diff(before, self._probe())
+            if not _is_failure(response):
+                self._attach_changes(response, before, dry_run)
         except Exception:
             response = self._error(traceback.format_exc())
         if dry_run or _is_failure(response):
@@ -213,6 +225,19 @@ class TransactionRunner:
         else:
             self._on_committed(item.command.get("type", "?"))
         item.result = response
+
+    def _attach_changes(self, response: dict, before, dry_run: bool):
+        after = self._probe()
+        result = response.get("result")
+        if before is None or after is None or not isinstance(result, dict):
+            return
+        changes = timeline_changes(before, after)
+        if dry_run:
+            result["dry_run"] = changes
+            return
+        changes = {key: value for key, value in changes.items() if value}
+        if changes:
+            result["timeline_changes"] = changes
 
     def _on_destroy(self):
         self._command_handlers = []

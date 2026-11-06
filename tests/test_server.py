@@ -209,7 +209,17 @@ class TestGuide:
 
         names = {t["name"] for t in TOOLS}
         mentioned = set(re.findall(r"\b[a-z]+(?:_[a-z]+)+\b", INSTRUCTIONS))
-        assert mentioned - {"problems_only", "rolled_back"} <= names
+        # result fields and parameters the rules refer to
+        fields = {
+            "problems_only",
+            "rolled_back",
+            "job_id",
+            "timeline_changes",
+            "removed_items",
+            "new_problems",
+            "user_actions",
+        }
+        assert mentioned - fields <= names
         assert set(EDIT_MODEL_STEPS) <= names
         assert set(EDIT_MODEL_STEPS) <= mentioned
 
